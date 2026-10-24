@@ -23,9 +23,9 @@ all:
 
 check:
 	bash -n bin/pcrlock
-	sh -n bin/platsec-pcr-check
-	sh -n libexec/sign-file-tpm2
-	sh -n kernel-install/99-pcrlock.install
+	dash -n bin/platsec-pcr-check
+	dash -n libexec/sign-file-tpm2
+	dash -n kernel-install/99-pcrlock.install
 	bash -n dracut/91platsec/module-setup.sh
 	bash -n dracut/91pcr15seal/module-setup.sh
 	if command -v shellcheck >/dev/null; then shellcheck $(SCRIPTS); fi

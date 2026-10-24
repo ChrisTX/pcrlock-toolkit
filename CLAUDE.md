@@ -21,6 +21,9 @@ without a reason.
 - `kernel-install/99-pcrlock.install`: thin wrapper around `pcrlock uki`.
 - `hooks/25-pcrlock-pe.hook`: pacman hook. `examples/hooks/` are *not* installed
   as hooks.
+- `examples/hardening/`: general hardening examples (cmdline, sysctl, …),
+  unrelated to pcrlock and not installed. Keep them out of
+  `examples/dracut.conf.d/`, whose `*.conf` users are told to copy wholesale.
 - `libexec/sign-file-tpm2` + `conf/openssl-tpm2.cnf`: DKMS signing with a
   TPM2 key. Unrelated to pcrlock; may move to its own package.
 

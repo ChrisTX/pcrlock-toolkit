@@ -29,6 +29,11 @@ for a TPM2-unlocked system:
 | `/usr/lib/dracut/modules.d/91platsec`, `91pcr15seal` | initrd modules (opt-in) |
 | `/usr/share/pcrlock-toolkit/examples/` | example components, dracut configs and pacman hooks |
 
+`examples/hardening/` in the source tree holds unrelated system hardening
+examples (kernel command line, sysctl, modprobe, sysusers, systemd and dracut
+drop-ins). They are not installed by the package; each file names its target
+path in its first line.
+
 ## `pcrlock`
 
 ```

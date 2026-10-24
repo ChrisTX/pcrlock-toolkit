@@ -15,6 +15,7 @@ depends=(
   'systemd'    # systemd-pcrlock, systemd-pcrextend, varlinkctl
   'jq'
   'coreutils'
+  'diffutils'  # cmp
   'grep'
   'kmod'       # modprobe in the initrd
   'tpm2-tss'
@@ -23,6 +24,7 @@ optdepends=(
   'dracut: initrd modules platsec and pcr15seal'
   'tpm2-openssl: TPM2-backed DKMS module signing via sign-file-tpm2'
 )
+checkdepends=('dash')  # make check: dash -n on the POSIX sh scripts
 conflicts=('pcrlock-hardening')
 replaces=('pcrlock-hardening')
 backup=(
