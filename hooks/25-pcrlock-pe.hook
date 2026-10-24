@@ -1,5 +1,6 @@
 # Re-lock boot loader binaries (components with Type=pe) when the packages
-# shipping them change.
+# shipping them change, and predict the SbatLevel a new shim will set
+# (Type=secureboot-authority with Path=).
 #
 # Type=pe components lock the unsigned binaries the packages ship: the PCR 4
 # measurement is the Authenticode hash, which excludes the signature, so it is
@@ -20,4 +21,4 @@ Target = usr/lib/systemd/boot/efi/systemd-boot*.efi
 [Action]
 Description = Updating pcrlock components for boot loaders...
 When = PostTransaction
-Exec = /usr/bin/pcrlock generate --type=pe --policy=mark
+Exec = /usr/bin/pcrlock generate --type=pe,secureboot-authority --policy=mark

@@ -186,6 +186,31 @@ matches component ids by the substring `secureboot-policy`. A same-named
 so the type warns about it. `pcrlock-secureboot-policy.path` watches only
 dbx, for the same reason.
 
+**`Type=secureboot-authority` and SbatLevel.** Wraps
+`lock-secureboot-authority` (the authorities after the separator). With
+`Path=` (the shim binary), it predicts the SbatLevel the next shim boot
+measures and replaces only that record, giving a whole alternative of 620
+(same variant count as splitting 620, no record-position filters). The
+current record is found by rebuilding it from `SbatLevelRT` and matching its
+sha256; exactly one match is required, which also proves the encoding. The
+prediction mirrors shim's `set_sbat_uefi_variable`/`preserve_sbat_uefi_variable`:
+candidate is the automatic payload, or latest with `SbatPolicy` = 1 (2
+automatic, 3 reset is ignored under Secure Boot; shim deletes SbatPolicy
+after reading it); a valid current level is kept if its version field is
+higher or its first 10 datestamp characters aren't older. `.sbatlevel` is a
+u32 format version (0) followed by two u32 offsets (automatic, latest)
+relative to the offset table, pointing at NUL-terminated strings. Its PE
+section name is longer than 8 bytes, so the section table holds `/<n>`, an
+offset into the COFF string table (after the symbol table). Strings are passed
+via `printf -v`/`read -d ''`, since `$(...)` would strip SbatLevel's trailing
+newline; `tail | head` dies of SIGPIPE under `pipefail`, hence `dd`. The
+pacman hook runs `--type=pe,secureboot-authority` (`--type=` takes a list).
+
+**No option ROM variants.** Option ROMs verified before the separator (e.g.
+KVMs a server provider attaches) add authority records that could be
+anything. Accepting unknown ones would defeat the point of PCR 7, so a new
+option ROM means a recovery unlock and a regenerated policy, by design.
+
 **Failure handling in `generate`.** Each component runs in a subshell. A
 failing one (e.g. a volume not TPM-unlocked this boot) keeps its existing file,
 and the others still run. `MinRecords=` (default 1) prevents writing empty
@@ -356,6 +381,11 @@ the logged content against the digest. ✗ is expected for volume-key records
 - The Intel paths of platsec: TME via MSR 0x982 and the DMAR flags offset
   (only exercised against fake sysfs).
 - A booted mkosi-initrd image (only test-built).
+- `Type=secureboot-authority` against the real `lock-secureboot-authority`
+  (stubbed with aurora's logged authorities; the SbatLevel record and the
+  prediction were checked against aurora's real `SbatLevelRT` and the
+  installed shim 16.1). Not yet through a real shim update that raises
+  SbatLevel.
 - `Type=secureboot-policy` and the variant budget against the real
   `systemd-pcrlock` (only stubs fed with aurora's real PCR 7 log). In
   particular: that `lock-secureboot-policy` records come in log order, and
@@ -375,15 +405,7 @@ the logged content against the digest. ✗ is expected for volume-key records
   `systemd-boot*.efi.signed`. Until then, an ESP copy hook is needed
   (`examples/hooks/22-update-systemd-boot.hook`).
 - **Not covered by the toolkit yet.** PCR 1 (SMBIOS/firmware config,
-  BootOrder/BBS variants). PCR 7 plan, in this order:
-  - SbatLevel: on a shim update, read its `.sbatlevel` section, pick the level
-    shim will apply (`SbatPolicy`, default previous, only if newer than the
-    current `SbatLevel`), and write a whole alternative of 620 with only the
-    SbatLevel record swapped (same variant count as a split, no
-    record-position filters). Self-check: rebuild the current record first.
-  - Option ROM authorities before the separator (KVMs on the RAID server):
-    an early component with an empty variant plus one computed from db per
-    allowed CA (most likely Microsoft UEFI CA 2011).
+  BootOrder/BBS variants). Remaining PCR 7 work:
   - A dbx tool for a local-KEK setup: verify Microsoft's signed update,
     diff against the current dbx, refuse if anything that boots is revoked
     (`lock-pe` Authenticode hashes), sign the additions as an append write

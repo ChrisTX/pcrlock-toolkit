@@ -68,7 +68,7 @@ pcrlock uki remove KVER
 pcrlock check                  show how many values each PCR can take (max 8)
 ```
 
-Options: `--type=TYPE`, `--policy=now|mark|none`, `--dry-run`, `-v`.
+Options: `--type=TYPE[,TYPE...]`, `--policy=now|mark|none`, `--dry-run`, `-v`.
 After any change the policy is updated by restarting
 `systemd-pcrlock-make-policy.service` (`now`), marking it for pacman's
 restart-marked hook (`mark`), or not at all (`none`). Put make-policy options
@@ -92,7 +92,8 @@ same value are counted twice.
 
 ### Boot loader updates and pruning
 
-`25-pcrlock-pe.hook` runs `pcrlock generate --type=pe --policy=mark` when the
+`25-pcrlock-pe.hook` runs
+`pcrlock generate --type=pe,secureboot-authority --policy=mark` when the
 shim or systemd-boot binaries in their packages change, and
 `30-systemd-restart-marked.hook` then updates the policy once for the whole
 transaction. `Type=pe` components lock the unsigned binaries: PCR 4 records
@@ -134,6 +135,7 @@ reboots. `pcrlock prune` removes it once it no longer matches.
 | `platsec` | the current `platsec-pcr-check --status` (refuses if not met) | `PCR=` (from platsec.conf) |
 | `copy` | a copy of an existing `.pcrlock` file | `Source=` |
 | `secureboot-policy` | `lock-secureboot-policy` (PCR 7); only dbx may differ from the current boot (KeepPrevious defaults to yes) | |
+| `secureboot-authority` | `lock-secureboot-authority` (PCR 7), with the SbatLevel the shim at `Path=` will set (KeepPrevious defaults to yes) | `Path=` (optional) |
 
 Common keys: `Enabled=`, `Output=` (path relative to `/etc/pcrlock.d`),
 `KeepPrevious=`, `MinRecords=` (default 1).
@@ -170,7 +172,20 @@ systemd's units to lock them again; it doesn't touch the files in
 `/etc/pcrlock.d`.
 
 Updates applied outside the running system (Windows, a firmware update that
-resets the keys) can't be predicted and need a recovery unlock too.
+resets the keys) can't be predicted and need a recovery unlock too. So does
+a new option ROM, e.g. a different KVM attached to a server: it adds an
+authority record to PCR 7 (and changes PCR 2).
+
+**SbatLevel.** shim measures its `SbatLevel` variable into PCR 7, after it
+may have raised it on startup. `Type=secureboot-authority` with `Path=` set
+to the shim binary predicts that: it reads the shim's `.sbatlevel` section,
+picks the payload shim will use (the automatic one, or the latest if
+`mokutil --set-sbat-policy latest` is pending) and keeps the current level if
+that's newer, as shim does. If the level changes, the SbatLevel record is
+swapped in a copy of the current boot's authorities, and the current variant
+is kept as `-previous`. The pacman hook runs this when the shim package
+changes. Remove `/var/lib/pcrlock.d/620-secureboot-authority.pcrlock.d` and
+disable `systemd-pcrlock-secureboot-authority.service` first.
 
 **sbctl and fwupd.** sbctl can't enroll a dbx
 ([Foxboron/sbctl#23](https://github.com/Foxboron/sbctl/issues/23)), so after

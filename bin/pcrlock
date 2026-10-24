@@ -19,6 +19,10 @@ readonly MAKE_POLICY_UNIT=systemd-pcrlock-make-policy.service
 readonly MAX_PCR_VALUES=8
 # systemd-pcrlock's default for --location=.
 readonly DEFAULT_LOCATION=760-:940-
+readonly EFIVARS=/sys/firmware/efi/efivars
+readonly SHIM_LOCK_GUID=605dab50-e046-4300-abb6-3dd810dd8b23
+# shim's SBAT_VAR_ORIGINAL, the shortest valid SbatLevel.
+readonly SBAT_ORIGINAL=$'sbat,1,2021030218\n'
 
 config_dir=/etc/pcrlock-toolkit
 
@@ -59,7 +63,7 @@ Commands:
                            every policy update.
 
 Options:
-  --type=TYPE              generate: only components of this type.
+  --type=TYPE[,TYPE...]    generate: only components of these types.
   --policy=now|mark|none   How to update the policy after changes:
                            now:  restart $MAKE_POLICY_UNIT
                            mark: mark it for restart (pacman's restart-marked hook)
@@ -82,6 +86,9 @@ Component types (Type= in components.d/*.conf):
   secureboot-policy
               lock-secureboot-policy (PCR 7); only dbx may
               differ from the current boot
+  secureboot-authority
+              lock-secureboot-authority (PCR 7), with the       [Path=]
+              SbatLevel the shim at Path= will set
 Common keys: Enabled=, Output=, KeepPrevious=, MinRecords=
 EOF
 }
@@ -181,7 +188,7 @@ load_component() {
     parse_kv_file "$f" component_kv
 
     case $c_type in
-    pe | secureboot-policy) : "${c_keep_previous:=yes}" ;;
+    pe | secureboot-policy | secureboot-authority) : "${c_keep_previous:=yes}" ;;
     log | volume-key | identity | raw | platsec | copy) : "${c_keep_previous:=no}" ;;
     '') die "$f: Type= missing" ;;
     *) die "$f: unknown Type '$c_type'" ;;
@@ -339,6 +346,159 @@ gen_secureboot_policy() {
     done
 }
 
+# read_uint FILE OFFSET SIZE: little-endian unsigned integer from a binary file.
+read_uint() {
+    od -An -tu"$3" -j "$2" -N "$3" -- "$1" | tr -d ' '
+}
+
+# pe_section FILE NAME OUT: writes the data of PE section NAME to OUT.
+pe_section() {
+    local f=$1 want=$2 out=$3 pe nsec off i name strtab
+    pe=$(read_uint "$f" 60 4)
+    [[ $(od -An -c -j "$pe" -N 4 -- "$f" | tr -d ' ') == 'PE\0\0' ]] || die "$f: not a PE binary"
+    nsec=$(read_uint "$f" $((pe + 6)) 2)
+    off=$((pe + 24 + $(read_uint "$f" $((pe + 20)) 2)))
+    # Names longer than 8 bytes (such as .sbatlevel) are "/<offset>" into the
+    # COFF string table, which follows the 18-byte symbol table entries.
+    strtab=$(($(read_uint "$f" $((pe + 12)) 4) + 18 * $(read_uint "$f" $((pe + 16)) 4)))
+    for ((i = 0; i < nsec; i++, off += 40)); do
+        name=$(od -An -c -j "$off" -N 8 -- "$f" | tr -d ' ')
+        name=${name%%\\0*}
+        if [[ $name =~ ^/([0-9]+)$ ]]; then
+            read_cstring "$f" $((strtab + BASH_REMATCH[1])) name
+        fi
+        [[ $name == "$want" ]] || continue
+        # VirtualSize: the raw data is padded to the file alignment.
+        dd if="$f" of="$out" bs=4096 iflag=skip_bytes,count_bytes status=none \
+            skip="$(read_uint "$f" $((off + 20)) 4)" count="$(read_uint "$f" $((off + 8)) 4)"
+        return 0
+    done
+    die "$f: no $want section"
+}
+
+# The SbatLevel helpers below return strings through a variable name, since
+# command substitution would strip the trailing newline SbatLevel ends with.
+
+# read_cstring FILE OFFSET VAR: sets VAR to the NUL-terminated string at OFFSET.
+read_cstring() {
+    IFS= read -r -d '' "$3" < <(tail -c +$(($2 + 1)) -- "$1") || true
+}
+
+# efivar_text NAME VAR: sets VAR to the data of an EFI variable (without the
+# attributes), or fails if it doesn't exist.
+efivar_text() {
+    local f=$EFIVARS/$1 data
+    [[ -r $f ]] || return 1
+    data=$(tail -c +5 -- "$f"; printf x)
+    printf -v "$2" '%s' "${data%x}"
+}
+
+# sbat_keeps CURRENT CANDIDATE: does shim keep the CURRENT SbatLevel instead of
+# writing CANDIDATE? Mirrors preserve_sbat_uefi_variable(): a valid current
+# level stays if its version is higher or its datestamp isn't older.
+sbat_keeps() {
+    local cur=$1 new=$2 cv cd nv nd
+    [[ $cur == sbat,* && ${#cur} -ge ${#SBAT_ORIGINAL} ]] || return 1
+    IFS=, read -r _ cv cd <<<"${cur%%$'\n'*}"
+    IFS=, read -r _ nv nd <<<"${new%%$'\n'*}"
+    if ((${#cv} > ${#nv})) || [[ ${#cv} -eq ${#nv} && $cv > "$nv" ]]; then
+        return 0
+    fi
+    [[ ! ${cd:0:10} < "${nd:0:10}" ]]
+}
+
+# shim_next_sbat SHIM CURRENT VAR: sets VAR to the SbatLevel SHIM leaves behind on
+# its next boot, from its .sbatlevel section (format version, then the
+# offsets of the automatic and latest payloads relative to the offset table)
+# and a pending SbatPolicy (1 latest, 2 automatic, 3 reset, which shim
+# ignores with Secure Boot on). shim deletes SbatPolicy once it has read it.
+shim_next_sbat() {
+    local shim=$1 cur=$2 sec=$tmp/sbatlevel.bin policy=2 cand
+    pe_section "$shim" .sbatlevel "$sec"
+    [[ $(read_uint "$sec" 0 4) == 0 ]] || die "$shim: unknown .sbatlevel format"
+    if [[ -r $EFIVARS/SbatPolicy-$SHIM_LOCK_GUID ]]; then
+        policy=$(read_uint "$EFIVARS/SbatPolicy-$SHIM_LOCK_GUID" 4 1)
+    fi
+    if [[ $policy == 1 ]]; then
+        read_cstring "$sec" $((4 + $(read_uint "$sec" 8 4))) cand
+    else
+        read_cstring "$sec" $((4 + $(read_uint "$sec" 4 4))) cand
+    fi
+    [[ $cand == sbat,* ]] || die "$shim: malformed .sbatlevel payload"
+    if sbat_keeps "$cur" "$cand"; then
+        printf -v "$3" '%s' "$cur"
+    else
+        printf -v "$3" '%s' "$cand"
+    fi
+}
+
+# u64le N: N as 8 little-endian bytes.
+u64le() {
+    local h i
+    h=$(printf '%016x' "$1")
+    for ((i = 14; i >= 0; i -= 2)); do printf '%b' "\\x${h:i:2}"; done
+}
+
+# var_event FILE GUID NAME DATA: writes the UEFI_VARIABLE_DATA that the
+# firmware and shim hash for variable events. GUID is given as its 16 bytes
+# in hex, in on-disk (mixed-endian) order.
+var_event() {
+    local file=$1 guid=$2 name=$3 data=$4 i
+    {
+        for ((i = 0; i < 32; i += 2)); do printf '%b' "\\x${guid:i:2}"; done
+        u64le "${#name}"
+        u64le "$(printf '%s' "$data" | wc -c)"
+        for ((i = 0; i < ${#name}; i++)); do printf '%s\0' "${name:i:1}"; done
+        printf '%s' "$data"
+    } >"$file"
+}
+
+# digest ALG FILE: prints the digest of FILE for a TPM hash algorithm name.
+digest() {
+    case $1 in
+    sha1 | sha256 | sha384 | sha512) "${1}sum" -- "$2" | cut -d' ' -f1 ;;
+    *) die "unsupported hash algorithm '$1'" ;;
+    esac
+}
+
+gen_secureboot_authority() {
+    local out=$1 f cur next ev=$tmp/sbat-event.bin next_ev=$tmp/sbat-event-next.bin found alg
+    "$PCRLOCK" lock-secureboot-authority --pcrlock="$out"
+    for f in /var/lib/pcrlock.d/*-secureboot-authority.pcrlock /var/lib/pcrlock.d/*-secureboot-authority.pcrlock.d; do
+        warn "$f duplicates component '$c_name'; remove it and disable systemd-pcrlock-secureboot-authority.service"
+    done
+    [[ -n $c_path ]] || return 0
+    [[ -r $c_path ]] || die "$c_file: $c_path not readable"
+
+    # shim measures SbatLevel into PCR 7 as an authority event, after it may
+    # have updated the variable. Find the current record by its digest, which
+    # also proves the encoding, and swap in the level the new shim will set.
+    efivar_text "SbatLevelRT-$SHIM_LOCK_GUID" cur ||
+        die "$c_name: SbatLevelRT not found; was this boot started by shim?"
+    var_event "$ev" 50ab5d6046e00043abb63dd810dd8b23 SbatLevel "$cur"
+    found=$(jq --arg d "$(digest sha256 "$ev")" \
+        '[.records[] | select(.pcr == 7 and any(.digests[]; .hashAlg == "sha256" and .digest == $d))] | length' "$out")
+    [[ $found == 1 ]] ||
+        die "$c_name: found $found PCR 7 records for the current SbatLevel, expected 1"
+
+    shim_next_sbat "$c_path" "$cur" next
+    if [[ $next == "$cur" ]]; then
+        debug "$c_name: SbatLevel stays at ${cur%%$'\n'*}"
+        return 0
+    fi
+    log "$c_name: $c_path will set SbatLevel to ${next%%$'\n'*} (now ${cur%%$'\n'*})"
+    var_event "$next_ev" 50ab5d6046e00043abb63dd810dd8b23 SbatLevel "$next"
+    for alg in $(jq -r '[.records[].digests[].hashAlg] | unique | .[]' "$out"); do
+        jq -nc --arg a "$alg" --arg d "$(digest "$alg" "$next_ev")" '{hashAlg: $a, digest: $d}'
+    done | jq -s . >"$tmp/sbat-digests.json"
+    jq --arg d "$(digest sha256 "$ev")" --slurpfile next "$tmp/sbat-digests.json" '
+        .records |= map(if .pcr == 7 and any(.digests[]; .hashAlg == "sha256" and .digest == $d)
+            then {pcr, digests: [.digests[].hashAlg as $a | $next[0][] | select(.hashAlg == $a)]}
+            else . end)
+    ' "$out" >"$out.next"
+    mv -f -- "$out.next" "$out"
+}
+
 gen_copy() {
     [[ -n $c_source ]] || die "$c_file: Source= missing"
     [[ -r $c_source ]] || die "$c_file: $c_source not readable"
@@ -397,6 +557,7 @@ run_component() {
     platsec) gen_platsec "$out" ;;
     copy) gen_copy "$out" ;;
     secureboot-policy) gen_secureboot_policy "$out" ;;
+    secureboot-authority) gen_secureboot_authority "$out" ;;
     esac
 
     got=$(jq '.records | length' "$out") || die "$c_name: generated file is not valid JSON"
@@ -535,7 +696,7 @@ cmd_generate() {
     for f in "${files[@]}"; do
         load_component "$f"
         if ((${#wanted[@]})) && [[ -z ${wanted[$c_name]:-} ]]; then continue; fi
-        if [[ -n $type_filter && $c_type != "$type_filter" ]]; then continue; fi
+        if [[ -n $type_filter && ,$type_filter, != *,"$c_type",* ]]; then continue; fi
         if ! is_yes "$c_enabled"; then
             debug "$c_name: disabled"
             continue
