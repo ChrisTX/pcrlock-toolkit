@@ -1,0 +1,35 @@
+post_install() {
+  cat <<'EOF'
+==> pcrlock-toolkit: nothing is active until you configure it.
+
+    Components: copy what applies from
+      /usr/share/pcrlock-toolkit/examples/components.d/
+    to /etc/pcrlock-toolkit/components.d/, adjust, then:
+      pcrlock generate --dry-run
+      pcrlock generate
+      pcrlock list
+    To drop stale '-previous' variants after each boot:
+      systemctl enable systemd-pcrlock-make-policy.service pcrlock-prune.service
+
+    Initrd modules (dracut): check `platsec-pcr-check --status` exits 0 and
+    the platsec/initrd-seal components exist, then copy
+      /usr/share/pcrlock-toolkit/examples/dracut.conf.d/*.conf
+    to /etc/dracut.conf.d/ and rebuild the UKI.
+EOF
+}
+
+post_upgrade() {
+  cat <<'EOF'
+==> pcrlock-toolkit: rebuild your UKI so the initrd picks up the new version,
+    and run `pcrlock generate` if measured strings changed.
+EOF
+}
+
+post_remove() {
+  cat <<'EOF'
+==> pcrlock-toolkit: generated files in /etc/pcrlock.d were left in place.
+    Remove the ones you no longer want, remove the dracut configs from
+    /etc/dracut.conf.d, then restart systemd-pcrlock-make-policy.service
+    and rebuild the UKI.
+EOF
+}

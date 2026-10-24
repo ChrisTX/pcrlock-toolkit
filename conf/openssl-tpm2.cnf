@@ -1,0 +1,27 @@
+# /etc/pcrlock-toolkit/openssl-tpm2.cnf
+# Standalone OpenSSL 3 config: loads the default provider plus tpm2-openssl.
+# Used by sign-file-tpm2; also usable via OPENSSL_CONF=<this file> (efitools,
+# openssl CLI). Deliberately does NOT include /etc/ssl/openssl.cnf.
+
+openssl_conf = openssl_init
+
+[openssl_init]
+providers = provider_sect
+
+[provider_sect]
+default = default_sect
+tpm2    = tpm2_sect
+
+[default_sect]
+activate = 1
+
+[tpm2_sect]
+activate = 1
+# Found automatically in /usr/lib/ossl-modules; uncomment if it isn't:
+# module = /usr/lib/ossl-modules/tpm2.so
+
+# No default_properties = ?provider=tpm2 on purpose: tpm2-openssl also
+# implements digests, and preferring it globally would push every SHA-256
+# (whole UKIs, modules) through the TPM. Keys in TSS2 PEM files are routed to
+# the TPM automatically when loaded; for key *generation* pass
+# -propquery provider=tpm2 explicitly.

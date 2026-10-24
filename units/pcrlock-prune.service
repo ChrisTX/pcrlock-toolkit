@@ -1,0 +1,29 @@
+#  After a boot, drop '-previous' component variants that no longer match the
+#  running system (kept by `pcrlock` so the previous boot stayed covered while
+#  an update was pending), and UKI variants of kernels that are gone.
+#
+#  Runs before systemd-pcrlock-make-policy.service, which then builds the
+#  policy from the pruned set; that unit must be enabled. Don't use
+#  --policy=now here: restarting a unit ordered after this one from within it
+#  would deadlock.
+
+[Unit]
+Description=Prune stale pcrlock component variants
+Documentation=file:///usr/share/doc/pcrlock-toolkit/README.md
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=sysinit.target shutdown.target systemd-pcrlock-make-policy.service
+After=systemd-remount-fs.service var.mount
+ConditionPathExists=!/etc/initrd-release
+ConditionSecurity=measured-uki
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# /tmp may not be mounted yet this early.
+RuntimeDirectory=pcrlock-toolkit
+Environment=TMPDIR=%t/pcrlock-toolkit
+ExecStart=/usr/bin/pcrlock prune --policy=none
+
+[Install]
+WantedBy=sysinit.target

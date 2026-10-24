@@ -1,0 +1,39 @@
+#  Seal the initrd phase by extending a fixed word into PCR 15.
+#
+#  The measurement goes through the io.systemd.PCRExtend Varlink interface,
+#  the same path systemd-cryptsetup uses for its own measurements. If that
+#  path is broken, this unit fails and the boot is aborted.
+#
+#  Runs only inside the initrd (ConditionPathExists=/etc/initrd-release) and
+#  is pulled into the initrd by the pcr15seal dracut module. Customise it on
+#  the host with `systemctl edit initrd-pcr15-seal.service`; the module copies
+#  host overrides into hostonly images. Rebuild the initrd afterwards.
+#
+#  If you change the measured text, regenerate the matching pcrlock component:
+#    printf %s <text> | systemd-pcrlock lock-raw --pcr=15 \
+#        --pcrlock=/etc/pcrlock.d/799-initrd-seal.pcrlock
+
+[Unit]
+Description=Seal initrd phase in PCR 15
+Documentation=man:systemd-pcrextend(8) man:varlinkctl(1)
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+Requires=systemd-pcrextend.socket
+After=systemd-pcrextend.socket tpm2.target cryptsetup.target initrd-fs.target
+Before=initrd.target initrd-cleanup.service initrd-switch-root.target
+# A boot that could not seal PCR 15 must not continue. PID 1 executes this
+# directly, so no queued job can cancel it.
+FailureAction=reboot-force
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# varlinkctl exits non-zero if the socket is missing or the call returns an
+# error (including a missing TPM), which triggers FailureAction=.
+ExecStart=/usr/bin/varlinkctl call /run/systemd/io.systemd.PCRExtend \
+    io.systemd.PCRExtend.Extend '{"pcr":15,"text":"initrd-sealed"}'
+# A hung TPM or service counts as failure (oneshot has no start timeout by default).
+TimeoutStartSec=30s
+
+[Install]
+WantedBy=initrd.target

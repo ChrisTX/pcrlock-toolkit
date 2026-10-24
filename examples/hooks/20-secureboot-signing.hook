@@ -1,0 +1,19 @@
+# Example: sign boot loader binaries for Secure Boot with a TPM2-held db key.
+# Writes <file>.signed next to each binary. Independent of 25-pcrlock-pe.hook:
+# signing doesn't change the Authenticode hash measured into PCR 4.
+# Adjust the key and certificate paths.
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/lib/systemd/boot/efi/systemd-boot*.efi
+Target = usr/lib/fwupd/efi/fwupdx64.efi
+Target = usr/share/shim/*.efi
+
+[Action]
+Description = Signing EFI binaries for Secure Boot
+When = PostTransaction
+Exec = /bin/sh -c 'while read -r f; do /usr/lib/systemd/systemd-sbsign sign --private-key-source=provider:tpm2 --private-key /etc/secureboot/keys/db/db.pem --certificate /etc/secureboot/keys/db/db.crt --output "${f}.signed" "$f"; done;'
+Depends = sh
+NeedsTargets

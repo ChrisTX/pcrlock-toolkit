@@ -1,0 +1,75 @@
+# Make the password prompt infinite
+rd.luks.options=timeout=0
+rootflags=x-systemd.device-timeout=0
+
+# Lock down systemd-gpt-auto-generator and systemd FACTORY_RESET mechanisms
+systemd.image_policy=root=encrypted+read-only-off:esp=unprotected+vfat:=absent+unused
+systemd.factory_reset=0
+
+# Force enable AppArmor, lockdown (integrity) and signature enforcment
+lsm=landlock,lockdown,yama,integrity,apparmor,bpf
+apparmor=1
+lockdown=integrity
+module.sig_enforce=1
+
+# Force IOMMU for both AMD and Intel CPUs
+iommu=panic
+iommu=force
+iommu.passthrough=0
+iommu.strict=1
+amd_iommu=force_isolation,pgtbl_v2
+intel_iommu=on
+
+# Various hardening settings, see KSPP and kernel-hardening-checker
+bdev_allow_write_mounted=0
+cfi=kcfi
+debugfs=off
+efi=disable_early_pci_dma
+hardened_usercopy=1
+hash_pointers=always
+init_on_alloc=1
+init_on_free=1
+page_alloc.shuffle=1
+proc_mem.force_override=never
+randomize_kstack_offset=1
+slab_nomerge
+vsyscall=none
+
+# Sysctls applied before PID 1 starts (signed + measured as part of the UKI).
+# Only settings systemd's own sysctl.d files don't touch - anything they do
+# set would be overwritten later by systemd-sysctl, those stay in sysctl.d.
+# One-way: cannot be undone at runtime once set
+sysctl.kernel.kexec_load_disabled=1
+sysctl.kernel.unprivileged_bpf_disabled=1
+# Full ASLR entropy for the initrd and PID 1, not just later processes
+sysctl.vm.mmap_rnd_bits=32
+sysctl.vm.mmap_rnd_compat_bits=16
+# Early-boot hygiene
+sysctl.kernel.kptr_restrict=2
+sysctl.kernel.dmesg_restrict=1
+sysctl.kernel.yama.ptrace_scope=2
+sysctl.kernel.perf_event_paranoid=2
+sysctl.dev.tty.ldisc_autoload=0
+sysctl.dev.tty.legacy_tiocsti=0
+sysctl.kernel.oops_limit=1
+sysctl.kernel.warn_limit=100
+
+# Enable EFI as PSTORE backend
+efi_pstore.pstore_disable=0
+
+# Reboot 10s after a panic instead of hanging (oops log is kept via efi-pstore)
+panic=10
+
+# Audit limits
+audit=1
+audit_backlog_limit=8192
+
+# Nvidia settings
+NVreg_UseKernelSuspendNotifiers=1
+
+# Disable emergency.target and shell to prevent access to the UKI
+rd.shell=0
+rd.emergency=reboot
+
+quiet
+splash

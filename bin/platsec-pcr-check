@@ -1,0 +1,307 @@
+#!/bin/sh
+# platsec-pcr-check: check the platform's memory protection baseline, measure it
+# into a TPM PCR as a single event, and refuse to continue if it isn't met.
+#
+# Checks (select with CHECKS=, PLATSEC_CHECKS or --checks=; default: all three):
+#
+#   memenc      Memory encryption
+#                 AMD:   TSME, from the ccp driver's tsme_status      -> tsme=<state>
+#                 Intel: TME, from MSR IA32_TME_ACTIVATE (0x982)      -> tme=<state>
+#   iommu       An IOMMU is active and every IOMMU group translates DMA
+#               (type DMA or DMA-FQ; no identity/passthrough groups)  -> iommu=<state>
+#   preboot_dma The firmware declares pre-boot DMA protection
+#                 AMD:   IVRS IVinfo bit 1 (DMA remap support)
+#                 Intel: DMAR flag DMA_CTRL_PLATFORM_OPT_IN (bit 2)   -> preboot_dma=<state>
+#
+# The measured event joins the enabled checks with ';' in the order above,
+# e.g. "tsme=on;iommu=on;preboot_dma=on". Something is always measured, so a
+# deviation changes the PCR value instead of leaving it untouched.
+#
+# Enforcement (default on; disable with ENFORCE=0, PLATSEC_ENFORCE=0 or
+# --no-enforce): if any check is not "on", the script still measures, prints a
+# warning to the console and exits with an error. The unit turns that into a forced power-off, so no PIN or
+# recovery key is ever typed into a machine that misses the baseline.
+#
+# Settings (PCR, enforcement, checks) come from, in order of precedence:
+# command line > PLATSEC_* environment variables > /etc/pcrlock-toolkit/platsec.conf
+# (path overridable with PLATSEC_CONFIG or --config=) > built-in defaults.
+#
+# Matching pcrlock component (use the exact string --status prints):
+#   pcrlock generate platsec   (component Type=platsec), or by hand:
+#   printf %s "$(platsec-pcr-check --status)" | systemd-pcrlock lock-raw \
+#       --pcr="$(platsec-pcr-check --print-pcr)" --pcrlock=/etc/pcrlock.d/790-platsec.pcrlock
+set -eu
+
+PCREXTEND=/usr/lib/systemd/systemd-pcrextend
+ACPI_TABLES=/sys/firmware/acpi/tables
+DEFAULT_CONFIG=/etc/pcrlock-toolkit/platsec.conf
+
+# Built-in defaults (lowest precedence).
+pcr=15
+enforce=1
+checks="memenc iommu preboot_dma"
+mode=measure
+force=0
+
+usage() {
+    cat <<EOF
+Usage: ${0##*/} [OPTIONS]
+
+  --status          Print the detected state and exit (0 if the baseline is
+                    met, 1 otherwise). Does not touch the TPM.
+  --pcr=N           PCR to extend (default: 15).
+  --checks=LIST     Comma- or space-separated checks to run
+                    (default: "memenc iommu preboot_dma").
+  --enforce         Fail if the baseline isn't met (default).
+  --no-enforce      Only measure, never fail because of the baseline.
+  --config=PATH     Config file (default: $DEFAULT_CONFIG).
+  --print-pcr       Print the effective PCR and exit.
+  --force           Allow measuring outside the initrd. Extending a PCR at
+                    runtime changes it until the next reboot.
+
+Precedence: command line > environment > config file > defaults.
+
+Environment:
+  PLATSEC_PCR, PLATSEC_CHECKS, PLATSEC_ENFORCE (0 or 1), PLATSEC_CONFIG
+Config file keys:
+  PCR=, CHECKS=, ENFORCE=
+EOF
+}
+
+die() { echo "${0##*/}: $*" >&2; exit 1; }
+
+# Parse the command line first, but apply it last, so it wins over the rest.
+config="${PLATSEC_CONFIG:-$DEFAULT_CONFIG}"
+config_explicit=${PLATSEC_CONFIG+1}
+cli_pcr='' cli_checks='' cli_enforce=''
+cli_pcr_set=0 cli_checks_set=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --status) mode=status ;;
+    --print-pcr) mode=print-pcr ;;
+    --force) force=1 ;;
+    --pcr=*) cli_pcr=${1#--pcr=}; cli_pcr_set=1 ;;
+    --checks=*) cli_checks=${1#--checks=}; cli_checks_set=1 ;;
+    --enforce) cli_enforce=1 ;;
+    --no-enforce) cli_enforce=0 ;;
+    --config=*) config=${1#--config=}; config_explicit=1 ;;
+    -h | --help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
+# Config file: plain KEY=VALUE lines, '#' comments, optional quotes around the
+# value. It is parsed, never sourced. A missing default config is fine; a
+# missing explicitly requested one is an error.
+if [ -e "$config" ]; then
+    [ -r "$config" ] || die "cannot read config file: $config"
+    n=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        # Trim leading/trailing whitespace.
+        line=${line#"${line%%[![:space:]]*}"}
+        line=${line%"${line##*[![:space:]]}"}
+        case "$line" in '' | '#'*) continue ;; esac
+        case "$line" in *=*) ;; *) die "$config:$n: expected KEY=VALUE" ;; esac
+        key=${line%%=*}
+        val=${line#*=}
+        key=${key%"${key##*[![:space:]]}"}
+        val=${val#"${val%%[![:space:]]*}"}
+        case "$val" in
+        \"*\") val=${val#\"}; val=${val%\"} ;;
+        \'*\') val=${val#\'}; val=${val%\'} ;;
+        esac
+        case "$key" in
+        PCR) pcr=$val ;;
+        CHECKS) checks=$val ;;
+        ENFORCE) enforce=$val ;;
+        *) die "$config:$n: unknown key '$key'" ;;
+        esac
+    done <"$config"
+elif [ -n "$config_explicit" ]; then
+    die "config file not found: $config"
+fi
+
+# Environment overrides the config file.
+[ -n "${PLATSEC_PCR+x}" ] && pcr=$PLATSEC_PCR
+[ -n "${PLATSEC_CHECKS+x}" ] && checks=$PLATSEC_CHECKS
+[ -n "${PLATSEC_ENFORCE+x}" ] && enforce=$PLATSEC_ENFORCE
+
+# Command line overrides everything.
+[ "$cli_pcr_set" -eq 1 ] && pcr=$cli_pcr
+[ "$cli_checks_set" -eq 1 ] && checks=$cli_checks
+[ -n "$cli_enforce" ] && enforce=$cli_enforce
+
+# Allow commas as separators.
+checks=$(printf '%s' "$checks" | tr ',' ' ')
+
+case "$pcr" in '' | *[!0-9]*) die "invalid PCR: '$pcr'" ;; esac
+[ "$pcr" -le 23 ] || die "invalid PCR: '$pcr'"
+if [ "$mode" = print-pcr ]; then
+    echo "$pcr"
+    exit 0
+fi
+case "$enforce" in 0 | 1) ;; *) die "invalid ENFORCE value: '$enforce' (expected 0 or 1)" ;; esac
+
+n=0
+for c in $checks; do
+    case "$c" in memenc | iommu | preboot_dma) ;; *) die "unknown check: '$c'" ;; esac
+    n=$((n + 1))
+done
+[ "$n" -gt 0 ] || die "no checks selected"
+
+cpuinfo_field() {
+    line=$(grep -m1 "^$1[[:space:]]*:" /proc/cpuinfo) || return 0
+    printf '%s\n' "${line#*: }"
+}
+
+# Print one byte of a file at a decimal offset as an unsigned integer.
+read_u8() {
+    v=$(od -An -tu1 -j "$2" -N1 "$1" 2>/dev/null | tr -d ' \n') || v=
+    printf '%s\n' "$v"
+}
+
+amd_tsme_state() {
+    modprobe ccp 2>/dev/null || true
+    # The ccp device may not be bound yet this early.
+    i=0
+    while [ "$i" -lt 50 ]; do
+        set -- /sys/bus/pci/drivers/ccp/*/tsme_status
+        [ -r "$1" ] && break
+        i=$((i + 1))
+        sleep 0.1
+    done
+    if [ -r "$1" ]; then
+        case "$(cat "$1")" in
+        1) echo on; return ;;
+        0) echo off; return ;;
+        esac
+    fi
+    echo unknown
+}
+
+intel_tme_state() {
+    # CPUID.07H:ECX[13] - the CPU supports TME at all.
+    case " $(cpuinfo_field flags) " in
+    *" tme "*) ;;
+    *) echo unsupported; return ;;
+    esac
+
+    modprobe msr 2>/dev/null || true
+    [ -r /dev/cpu/0/msr ] || { echo unknown; return; }
+
+    # IA32_TME_ACTIVATE (0x982). Reading MSRs is allowed under kernel lockdown.
+    hex=$(dd if=/dev/cpu/0/msr bs=8 count=1 skip=$((0x982)) iflag=skip_bytes \
+        status=none 2>/dev/null | od -An -tx8 | tr -d ' \n') || hex=
+    [ "${#hex}" -eq 16 ] || { echo unknown; return; }
+
+    # Only the low 32 bits are needed; keeps the arithmetic portable.
+    low=$((0x${hex#????????}))
+    lock=$((low & 1))              # bit 0:  configuration locked
+    enable=$(((low >> 1) & 1))     # bit 1:  hardware encryption enabled
+    bypass=$(((low >> 31) & 1))    # bit 31: encryption bypass for KeyID 0
+
+    if [ "$enable" -eq 0 ]; then
+        echo off
+    elif [ "$bypass" -eq 1 ]; then
+        echo bypass
+    elif [ "$lock" -eq 0 ]; then
+        echo unlocked
+    else
+        echo on
+    fi
+}
+
+iommu_state() {
+    # No IOMMU registered at all: disabled in firmware or no ACPI DMAR/IVRS.
+    set -- /sys/class/iommu/*
+    [ -e "$1" ] || { echo off; return; }
+
+    set -- /sys/kernel/iommu_groups/*/type
+    [ -r "$1" ] || { echo nogroups; return; }
+
+    for t in "$@"; do
+        case "$(cat "$t")" in
+        DMA | DMA-FQ | blocked) ;;
+        identity) echo passthrough; return ;;
+        *) echo unknown; return ;;
+        esac
+    done
+    echo on
+}
+
+preboot_dma_state() {
+    case "$vendor" in
+    AuthenticAMD)
+        # IVRS: 36-byte ACPI header, then IVinfo; bit 1 = DMA remap support.
+        table="$ACPI_TABLES/IVRS" offset=36 mask=2 ;;
+    GenuineIntel)
+        # DMAR: 36-byte header, host address width, then flags;
+        # bit 2 = DMA_CTRL_PLATFORM_OPT_IN.
+        table="$ACPI_TABLES/DMAR" offset=37 mask=4 ;;
+    *)
+        echo unsupported; return ;;
+    esac
+
+    [ -e "$table" ] || { echo notable; return; }
+    b=$(read_u8 "$table" "$offset")
+    case "$b" in '' | *[!0-9]*) echo unknown; return ;; esac
+    if [ $((b & mask)) -ne 0 ]; then echo on; else echo off; fi
+}
+
+vendor=$(cpuinfo_field vendor_id)
+
+event=
+ok=1
+add() {
+    event="${event:+$event;}$1=$2"
+    [ "$2" = on ] || ok=0
+}
+
+# Fixed order, independent of the order in PLATSEC_CHECKS.
+for c in memenc iommu preboot_dma; do
+    case " $checks " in *" $c "*) ;; *) continue ;; esac
+    case "$c" in
+    memenc)
+        case "$vendor" in
+        AuthenticAMD) add tsme "$(amd_tsme_state)" ;;
+        GenuineIntel) add tme "$(intel_tme_state)" ;;
+        *) add memenc unsupported ;;
+        esac ;;
+    iommu) add iommu "$(iommu_state)" ;;
+    preboot_dma) add preboot_dma "$(preboot_dma_state)" ;;
+    esac
+done
+
+if [ "$mode" = status ]; then
+    echo "$event"
+    [ "$ok" -eq 1 ]
+    exit
+fi
+
+if [ ! -e /etc/initrd-release ] && [ "$force" -ne 1 ]; then
+    die "refusing to extend PCR $pcr outside the initrd (use --force, or --status to just check)"
+fi
+
+"$PCREXTEND" --pcr="$pcr" "$event"
+
+[ "$ok" -eq 1 ] && exit 0
+
+if [ "$enforce" -eq 0 ]; then
+    echo "${0##*/}: memory protection baseline not met ($event); enforcement is disabled, continuing" >&2
+    exit 0
+fi
+
+cat >&2 <<EOF
+
+*** ${0##*/}: memory protection baseline NOT met:
+***   $event
+*** Refusing to continue: a PIN or recovery key entered now could be read
+*** from memory. Check the firmware settings for memory encryption, IOMMU
+*** and pre-boot DMA protection (firmware updates may reset them).
+*** Powering off in 10 seconds.
+
+EOF
+sleep 10
+exit 1

@@ -1,0 +1,18 @@
+# Example: install the signed systemd-boot as shim's second stage.
+# shim only chainloads \EFI\BOOT\grubx64.efi (next to itself), which
+# `bootctl update` doesn't manage, so the copy has to be done here.
+# Runs after 20-secureboot-signing.hook has refreshed the *.signed file.
+# Copies to a temporary name first, so an interrupted copy can't leave a
+# truncated boot loader behind. Adjust the ESP mount point (/boot here).
+
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = usr/lib/systemd/boot/efi/systemd-bootx64.efi
+
+[Action]
+Description = Updating systemd-boot behind shim...
+When = PostTransaction
+Exec = /bin/sh -c 'cp /usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed /boot/EFI/BOOT/grubx64.efi.new && mv -f /boot/EFI/BOOT/grubx64.efi.new /boot/EFI/BOOT/grubx64.efi'
+Depends = sh

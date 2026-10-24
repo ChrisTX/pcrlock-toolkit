@@ -1,0 +1,590 @@
+#!/usr/bin/bash
+# pcrlock - generate and maintain systemd-pcrlock components from a declarative
+# configuration. Part of pcrlock-toolkit.
+#
+# Components are described by files in /etc/pcrlock-toolkit/components.d/,
+# named <priority>-<name>.conf. Each produces <priority>-<name>.pcrlock in
+# /etc/pcrlock.d (or, with KeepPrevious=yes, a <priority>-<name>.pcrlock.d/
+# directory holding the current variant and the one the system booted with).
+# See pcrlock --help and the README for the available component types.
+set -euo pipefail
+shopt -s nullglob
+
+readonly PROG=${0##*/}
+readonly VERSION=0.1.0
+readonly PCRLOCK=/usr/lib/systemd/systemd-pcrlock
+readonly MAKE_POLICY_UNIT=systemd-pcrlock-make-policy.service
+
+config_dir=/etc/pcrlock-toolkit
+
+# Global settings, overridable in pcrlock.conf.
+opt_dir=/etc/pcrlock.d
+opt_policy=now
+opt_uki_component=650-uki
+opt_uki_entry_token=
+
+dry_run=0
+verbose=0
+policy_cli=
+type_filter=
+changed=0
+tmp=
+CEL=
+
+usage() {
+    cat <<EOF
+Usage: $PROG [OPTIONS] COMMAND [ARGS...]
+
+Generate and maintain systemd-pcrlock components from $config_dir.
+
+Commands:
+  generate [NAME...]       Generate all enabled components, or only the named
+                           ones, and update the policy if anything changed.
+  list                     Show configured components and their state.
+  prune                    Remove '-previous' variants that don't match the
+                           current boot, and UKI components of kernels that
+                           are no longer installed.
+  uki add ENTRY UKI [KERNEL]
+                           Lock a UKI (and the kernel image it loads) as
+                           variant ENTRY of the UKI component. Used by the
+                           kernel-install plugin.
+  uki remove ENTRY         Remove the UKI variant ENTRY.
+
+Options:
+  --type=TYPE              generate: only components of this type.
+  --policy=now|mark|none   How to update the policy after changes:
+                           now:  restart $MAKE_POLICY_UNIT
+                           mark: mark it for restart (pacman's restart-marked hook)
+                           none: leave it to you
+                           Default: Policy= in pcrlock.conf, else "now".
+  --dry-run                Show what would change without writing anything.
+  --config-dir=DIR         Configuration directory (default: $config_dir).
+  -v, --verbose            More output.
+  -h, --help               Show this help.
+  --version                Show the version.
+
+Component types (Type= in components.d/*.conf):
+  pe          lock-pe of an EFI binary                      Path=
+  log         records from the current event log            PCR= [EventTypes=] [Filter=]
+  volume-key  cryptsetup volume key measurement             Volume= [PCR=15]
+  identity    machine-id + file systems, merged             [MountPoints=/]
+  raw         fixed string, like systemd-pcrextend          PCR= Text=
+  platsec     current output of platsec-pcr-check --status  [PCR=]
+  copy        copy of an existing .pcrlock file             Source=
+Common keys: Enabled=, Output=, KeepPrevious=, MinRecords=
+EOF
+}
+
+die() { echo "$PROG: $*" >&2; exit 1; }
+warn() { echo "$PROG: warning: $*" >&2; }
+log() { echo "$PROG: $*"; }
+debug() { if ((verbose)); then echo "$PROG: $*" >&2; fi; }
+
+is_yes() {
+    case ${1,,} in
+    yes | true | on | 1) return 0 ;;
+    no | false | off | 0) return 1 ;;
+    *) die "invalid boolean '$1'" ;;
+    esac
+}
+
+# parse_kv_file FILE CALLBACK
+# Plain Key=Value lines; '#' starts a comment only at the beginning of a line
+# (values such as jq filters may contain '#'). Optional quotes around the value
+# are stripped. Calls CALLBACK KEY VALUE LOCATION for each entry.
+parse_kv_file() {
+    local file=$1 cb=$2 line key val n=0
+    while IFS= read -r line || [[ -n $line ]]; do
+        n=$((n + 1))
+        line=${line#"${line%%[![:space:]]*}"}
+        line=${line%"${line##*[![:space:]]}"}
+        [[ -z $line || $line == \#* ]] && continue
+        [[ $line == *=* ]] || die "$file:$n: expected Key=Value"
+        key=${line%%=*}
+        val=${line#*=}
+        key=${key%"${key##*[![:space:]]}"}
+        val=${val#"${val%%[![:space:]]*}"}
+        if [[ ${#val} -ge 2 && ( ($val == \"*\") || ($val == \'*\') ) ]]; then
+            val=${val:1:${#val}-2}
+        fi
+        "$cb" "$key" "$val" "$file:$n"
+    done <"$file"
+}
+
+global_kv() {
+    case $1 in
+    Directory) opt_dir=$2 ;;
+    Policy) opt_policy=$2 ;;
+    UkiComponent) opt_uki_component=$2 ;;
+    UkiEntryToken) opt_uki_entry_token=$2 ;;
+    *) die "$3: unknown key '$1'" ;;
+    esac
+}
+
+load_global() {
+    local f=$config_dir/pcrlock.conf
+    if [[ -e $f ]]; then
+        parse_kv_file "$f" global_kv
+    fi
+    case $opt_policy in now | mark | none) ;; *) die "$f: Policy= must be now, mark or none" ;; esac
+    [[ $opt_dir == /* ]] || die "$f: Directory= must be an absolute path"
+}
+
+# ---------------------------------------------------------------------------
+# Components
+
+reset_component() {
+    c_type='' c_enabled=yes c_path='' c_pcr='' c_text='' c_event_types='' c_filter=''
+    c_min_records=1 c_volume='' c_mounts=/ c_source='' c_output='' c_keep_previous=''
+}
+
+component_kv() {
+    case $1 in
+    Type) c_type=$2 ;;
+    Enabled) c_enabled=$2 ;;
+    Path) c_path=$2 ;;
+    PCR) c_pcr=$2 ;;
+    Text) c_text=$2 ;;
+    EventTypes) c_event_types=$2 ;;
+    Filter) c_filter=$2 ;;
+    MinRecords) c_min_records=$2 ;;
+    Volume) c_volume=$2 ;;
+    MountPoints) c_mounts=$2 ;;
+    Source) c_source=$2 ;;
+    Output) c_output=$2 ;;
+    KeepPrevious) c_keep_previous=$2 ;;
+    *) die "$3: unknown key '$1'" ;;
+    esac
+}
+
+# load_component FILE: sets c_* for the component described by FILE.
+load_component() {
+    local f=$1 base
+    base=${f##*/}
+    base=${base%.conf}
+    [[ $base =~ ^([0-9]+)-([A-Za-z0-9_.-]+)$ ]] ||
+        die "$f: file name must be <priority>-<name>.conf"
+    c_prio=${BASH_REMATCH[1]}
+    c_name=${BASH_REMATCH[2]}
+    c_file=$f
+    reset_component
+    parse_kv_file "$f" component_kv
+
+    case $c_type in
+    pe) : "${c_keep_previous:=yes}" ;;
+    log | volume-key | identity | raw | platsec | copy) : "${c_keep_previous:=no}" ;;
+    '') die "$f: Type= missing" ;;
+    *) die "$f: unknown Type '$c_type'" ;;
+    esac
+    is_yes "$c_enabled" >/dev/null || true
+    is_yes "$c_keep_previous" >/dev/null || true
+    [[ -z $c_pcr || $c_pcr =~ ^[0-9]+$ ]] || die "$f: PCR= must be a number"
+    [[ $c_min_records =~ ^[0-9]+$ ]] || die "$f: MinRecords= must be a number"
+}
+
+component_target() {
+    if [[ -n $c_output ]]; then
+        if [[ $c_output == /* ]]; then
+            printf '%s\n' "$c_output"
+        else
+            printf '%s\n' "$opt_dir/$c_output"
+        fi
+    elif is_yes "$c_keep_previous"; then
+        printf '%s\n' "$opt_dir/$c_prio-$c_name.pcrlock.d/$c_name.pcrlock"
+    else
+        printf '%s\n' "$opt_dir/$c_prio-$c_name.pcrlock"
+    fi
+}
+
+ensure_cel() {
+    if [[ ! -s $CEL ]]; then
+        "$PCRLOCK" cel >"$CEL" || die "failed to read the TPM event log"
+    fi
+}
+
+# is_booted FILE: does this component variant match the current boot?
+# If the variant has PCR 4 records (boot loaders, UKIs, kernels), only those
+# are compared, since they identify the binary that ran. Otherwise every record
+# must appear in the event log.
+is_booted() {
+    ensure_cel
+    jq -e --slurpfile cel "$CEL" '
+        [.records[]? | select(.pcr != null)] as $all
+        | (if any($all[]; .pcr == 4) then [$all[] | select(.pcr == 4)] else $all end) as $want
+        | ($want | length) > 0
+          and all($want[];
+                  . as $w
+                  | [$w.digests[]?.digest] as $d
+                  | any($cel[0][]; .pcr == $w.pcr
+                        and any(.digests[]?; .digest as $x | ($d | index($x)) != null)))
+    ' "$1" >/dev/null 2>&1
+}
+
+gen_pe() {
+    [[ -n $c_path ]] || die "$c_file: Path= missing"
+    [[ -r $c_path ]] || die "$c_file: $c_path not readable"
+    "$PCRLOCK" lock-pe "$c_path" --pcrlock="$1"
+}
+
+gen_log() {
+    local out=$1 types prog
+    [[ -n $c_pcr ]] || die "$c_file: PCR= missing"
+    ensure_cel
+    # shellcheck disable=SC2086 # word splitting of the type list is intended
+    types=$(printf '%s\n' $c_event_types | jq -Rsc 'split("\n") | map(select(length > 0))')
+    # jq program text; $pcr/$types are jq variables, not shell ones.
+    # shellcheck disable=SC2016
+    prog='[.[] | select(.pcr == $pcr)'
+    if [[ -n $c_event_types ]]; then
+        # shellcheck disable=SC2016
+        prog+=' | select(.content.event_type as $t | ($types | index($t)) != null)'
+    fi
+    if [[ -n $c_filter ]]; then
+        prog+=" | select($c_filter)"
+    fi
+    prog+='] | {records: map({pcr, digests, content})}'
+    jq --argjson pcr "$c_pcr" --argjson types "$types" "$prog" "$CEL" >"$out" ||
+        die "$c_file: filter failed"
+}
+
+gen_volume_key() {
+    local out=$1 got
+    [[ -n $c_volume ]] || die "$c_file: Volume= missing"
+    ensure_cel
+    jq --argjson pcr "${c_pcr:-15}" --arg vol "$c_volume" '
+        {records: [.[]
+            | select(.pcr == $pcr and .content.eventType == "volume-key")
+            | select((.content.string | split(":")[1]) == $vol)
+            | {pcr, digests, content}]}
+    ' "$CEL" >"$out"
+    got=$(jq '.records | length' "$out")
+    ((got == 1)) || die "$c_name: expected 1 volume-key record for '$c_volume', found $got (was it unlocked via TPM this boot?)"
+}
+
+gen_identity() {
+    local out=$1 i=0 mp f files=()
+    "$PCRLOCK" lock-machine-id --pcrlock="$tmp/id-machine-id.pcrlock"
+    files+=("$tmp/id-machine-id.pcrlock")
+    # shellcheck disable=SC2086 # word splitting of the mount point list is intended
+    for mp in $c_mounts; do
+        i=$((i + 1))
+        "$PCRLOCK" lock-file-system "$mp" --pcrlock="$tmp/id-fs-$i.pcrlock"
+        files+=("$tmp/id-fs-$i.pcrlock")
+    done
+    jq -s '{records: map(.records[])}' "${files[@]}" >"$out"
+
+    for f in /var/lib/pcrlock.d/820-machine-id.pcrlock \
+        /var/lib/pcrlock.d/830-root-file-system.pcrlock \
+        /var/lib/pcrlock.d/840-file-system-*.pcrlock; do
+        if [[ -e $f ]]; then
+            warn "$f duplicates component '$c_name'; remove it and disable systemd-pcrlock-machine-id.service / systemd-pcrlock-file-system.service"
+        fi
+    done
+}
+
+gen_raw() {
+    [[ -n $c_pcr ]] || die "$c_file: PCR= missing"
+    [[ -n $c_text ]] || die "$c_file: Text= missing"
+    printf '%s' "$c_text" | "$PCRLOCK" lock-raw --pcr="$c_pcr" --pcrlock="$1"
+}
+
+gen_platsec() {
+    local event pcr
+    command -v platsec-pcr-check >/dev/null || die "platsec-pcr-check not found"
+    if ! event=$(platsec-pcr-check --status); then
+        die "$c_name: platform baseline not met ($event); refusing to lock a failing state"
+    fi
+    pcr=${c_pcr:-$(platsec-pcr-check --print-pcr)}
+    printf '%s' "$event" | "$PCRLOCK" lock-raw --pcr="$pcr" --pcrlock="$1"
+}
+
+gen_copy() {
+    [[ -n $c_source ]] || die "$c_file: Source= missing"
+    [[ -r $c_source ]] || die "$c_file: $c_source not readable"
+    jq -e '.records | type == "array"' "$c_source" >/dev/null ||
+        die "$c_file: $c_source is not a pcrlock file"
+    cp -- "$c_source" "$1"
+}
+
+# install_variant NEW TARGET KEEP_PREVIOUS
+# Installs NEW as TARGET if it differs. With KEEP_PREVIOUS, an existing TARGET
+# that matches the current boot is kept as <name>-previous.pcrlock, so the
+# policy still covers the running system until the next reboot.
+install_variant() {
+    local new=$1 target=$2 keep=$3 prev
+    if [[ -f $target ]] && cmp -s -- "$new" "$target"; then
+        debug "${target#"$opt_dir"/}: unchanged"
+        return 0
+    fi
+
+    prev=${target%.pcrlock}-previous.pcrlock
+    if ((dry_run)); then
+        if [[ $keep == yes && -f $target ]] && is_booted "$target"; then
+            log "would keep ${target#"$opt_dir"/} as ${prev##*/}"
+        fi
+        log "would update ${target#"$opt_dir"/}"
+        : >"$tmp/changed"
+        return 0
+    fi
+
+    mkdir -p -- "${target%/*}"
+    if [[ $keep == yes && -f $target ]] && is_booted "$target"; then
+        mv -f -- "$target" "$prev"
+        log "kept ${target#"$opt_dir"/} as ${prev##*/} (matches the current boot)"
+    fi
+    install -m 0644 -- "$new" "$target.tmp"
+    mv -f -- "$target.tmp" "$target"
+    log "updated ${target#"$opt_dir"/}"
+    : >"$tmp/changed"
+}
+
+run_component() {
+    local out=$tmp/new-$c_prio-$c_name.pcrlock target got keep=no
+    target=$(component_target)
+    if is_yes "$c_keep_previous"; then
+        keep=yes
+        [[ ${target%/*} == *.pcrlock.d ]] ||
+            die "$c_file: KeepPrevious=yes needs the output inside a <name>.pcrlock.d directory"
+    fi
+
+    case $c_type in
+    pe) gen_pe "$out" ;;
+    log) gen_log "$out" ;;
+    volume-key) gen_volume_key "$out" ;;
+    identity) gen_identity "$out" ;;
+    raw) gen_raw "$out" ;;
+    platsec) gen_platsec "$out" ;;
+    copy) gen_copy "$out" ;;
+    esac
+
+    got=$(jq '.records | length' "$out") || die "$c_name: generated file is not valid JSON"
+    ((got >= c_min_records)) ||
+        die "$c_name: produced $got record(s), expected at least $c_min_records; keeping the existing file"
+    debug "$c_name: $got record(s)"
+    install_variant "$out" "$target" "$keep"
+}
+
+apply_policy() {
+    local mode=${policy_cli:-$opt_policy}
+    if [[ -e $tmp/changed ]]; then changed=1; fi
+    if ((!changed)); then
+        debug "nothing changed, policy left alone"
+        return 0
+    fi
+    if ((dry_run)); then
+        log "would update the policy ($mode)"
+        return 0
+    fi
+    case $mode in
+    now)
+        log "updating the policy ($MAKE_POLICY_UNIT)"
+        systemctl restart "$MAKE_POLICY_UNIT"
+        ;;
+    mark)
+        systemctl set-property --runtime "$MAKE_POLICY_UNIT" Markers=needs-start
+        log "marked $MAKE_POLICY_UNIT for restart"
+        ;;
+    none)
+        log "components changed; run 'systemctl restart $MAKE_POLICY_UNIT' to update the policy"
+        ;;
+    esac
+}
+
+component_files() {
+    local f
+    for f in "$config_dir"/components.d/*.conf; do
+        printf '%s\n' "$f"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+
+cmd_generate() {
+    local f rc name failed=0 matched=0
+    local -A wanted=() seen=()
+    for name in "$@"; do wanted[$name]=1; done
+
+    mapfile -t files < <(component_files)
+    for f in "${files[@]}"; do
+        load_component "$f"
+        [[ -z ${seen[$c_name]:-} ]] || die "$f: duplicate component name '$c_name'"
+        seen[$c_name]=1
+    done
+    for name in "${!wanted[@]}"; do
+        [[ -n ${seen[$name]:-} ]] || die "no such component: $name"
+    done
+
+    for f in "${files[@]}"; do
+        load_component "$f"
+        if ((${#wanted[@]})) && [[ -z ${wanted[$c_name]:-} ]]; then continue; fi
+        if [[ -n $type_filter && $c_type != "$type_filter" ]]; then continue; fi
+        if ! is_yes "$c_enabled"; then
+            debug "$c_name: disabled"
+            continue
+        fi
+        matched=$((matched + 1))
+        # Each component runs in a subshell, so one failing component (e.g. a
+        # volume not unlocked this boot) doesn't stop the others.
+        set +e
+        (set -e; run_component)
+        rc=$?
+        set -e
+        if ((rc != 0)); then failed=$((failed + 1)); fi
+    done
+
+    if ((matched == 0)); then
+        debug "no matching components"
+    fi
+    apply_policy
+    ((failed == 0)) || die "$failed component(s) failed; their existing files were kept"
+}
+
+cmd_list() {
+    local f target state
+    printf '%-5s %-24s %-11s %-9s %s\n' PRIO NAME TYPE STATE OUTPUT
+    while IFS= read -r f; do
+        load_component "$f"
+        target=$(component_target)
+        if ! is_yes "$c_enabled"; then
+            state=disabled
+        elif [[ ! -f $target ]]; then
+            state=missing
+        elif is_booted "$target"; then
+            state=booted
+        else
+            state=present
+        fi
+        printf '%-5s %-24s %-11s %-9s %s\n' "$c_prio" "$c_name" "$c_type" "$state" "${target#"$opt_dir"/}"
+    done < <(component_files)
+}
+
+remove_file() {
+    if ((dry_run)); then
+        log "would remove ${1#"$opt_dir"/} ($2)"
+    else
+        rm -f -- "$1"
+        log "removed ${1#"$opt_dir"/} ($2)"
+    fi
+    : >"$tmp/changed"
+}
+
+uki_entry_token() {
+    if [[ -n $opt_uki_entry_token ]]; then
+        printf '%s\n' "$opt_uki_entry_token"
+    elif [[ -s /etc/kernel/entry-token ]]; then
+        tr -d '[:space:]' </etc/kernel/entry-token
+        echo
+    else
+        tr -d '[:space:]' </etc/machine-id
+        echo
+    fi
+}
+
+cmd_prune() {
+    local f name kver token
+    for f in "$opt_dir"/*.pcrlock.d/*-previous.pcrlock; do
+        if is_booted "$f"; then
+            debug "${f#"$opt_dir"/}: matches the current boot, keeping"
+        else
+            remove_file "$f" "previous variant, not booted"
+        fi
+    done
+
+    token=$(uki_entry_token)
+    for f in "$opt_dir/$opt_uki_component.pcrlock.d/$token"-*.pcrlock; do
+        name=${f##*/}
+        name=${name%.pcrlock}
+        [[ $name == *-previous ]] && continue # handled above
+        kver=${name#"$token"-}
+        [[ -d /usr/lib/modules/$kver ]] && continue
+        if is_booted "$f"; then
+            debug "${f#"$opt_dir"/}: kernel $kver is gone but this is the current boot, keeping"
+        else
+            remove_file "$f" "kernel $kver no longer installed"
+        fi
+    done
+
+    apply_policy
+}
+
+cmd_uki() {
+    local sub=${1:-} entry dir target out
+    shift || true
+    case $sub in
+    add)
+        (($# >= 2 && $# <= 3)) || die "usage: $PROG uki add ENTRY UKI [KERNEL]"
+        entry=$1
+        [[ -r $2 ]] || die "$2 not readable"
+        [[ -z ${3:-} || -r $3 ]] || die "$3 not readable"
+        dir=$opt_dir/$opt_uki_component.pcrlock.d
+        target=$dir/$entry.pcrlock
+        out=$tmp/uki-merged.pcrlock
+        "$PCRLOCK" lock-uki "$2" --pcrlock="$tmp/uki.pcrlock"
+        if [[ -n ${3:-} ]]; then
+            # systemd-stub loads the embedded kernel via LoadImage(), which the
+            # firmware measures into PCR 4 as a separate event.
+            "$PCRLOCK" lock-pe "$3" --pcrlock="$tmp/uki-kernel.pcrlock"
+            jq -s '{records: (.[0].records + .[1].records)}' \
+                "$tmp/uki.pcrlock" "$tmp/uki-kernel.pcrlock" >"$out"
+        else
+            cp -- "$tmp/uki.pcrlock" "$out"
+        fi
+        install_variant "$out" "$target" yes
+        ;;
+    remove)
+        (($# == 1)) || die "usage: $PROG uki remove ENTRY"
+        target=$opt_dir/$opt_uki_component.pcrlock.d/$1.pcrlock
+        if [[ -e $target ]]; then
+            remove_file "$target" "UKI entry removed"
+        else
+            debug "${target#"$opt_dir"/} not present, nothing to do"
+        fi
+        ;;
+    *) die "usage: $PROG uki add|remove ..." ;;
+    esac
+    apply_policy
+}
+
+# ---------------------------------------------------------------------------
+
+main() {
+    local args=() cmd
+    while (($#)); do
+        case $1 in
+        --dry-run) dry_run=1 ;;
+        -v | --verbose) verbose=1 ;;
+        --policy=*) policy_cli=${1#*=} ;;
+        --type=*) type_filter=${1#*=} ;;
+        --config-dir=*) config_dir=${1#*=} ;;
+        -h | --help) usage; exit 0 ;;
+        --version) echo "$PROG $VERSION"; exit 0 ;;
+        --) shift; args+=("$@"); break ;;
+        -*) die "unknown option: $1 (see --help)" ;;
+        *) args+=("$1") ;;
+        esac
+        shift
+    done
+    ((${#args[@]})) || { usage >&2; exit 2; }
+    cmd=${args[0]}
+    args=("${args[@]:1}")
+
+    case $policy_cli in '' | now | mark | none) ;; *) die "--policy must be now, mark or none" ;; esac
+    ((EUID == 0)) || die "must be run as root (the event log and $(printf %q "$opt_dir") need it)"
+
+    load_global
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    CEL=$tmp/cel.json
+
+    case $cmd in
+    generate) cmd_generate "${args[@]}" ;;
+    list) ((${#args[@]} == 0)) || die "list takes no arguments"; cmd_list ;;
+    prune) ((${#args[@]} == 0)) || die "prune takes no arguments"; cmd_prune ;;
+    uki) cmd_uki "${args[@]}" ;;
+    help) usage ;;
+    *) die "unknown command: $cmd (see --help)" ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,13 @@
+# Example: install the signed shim and MokManager into the ESP fallback path.
+# Adjust the ESP mount point (/boot here) and target paths.
+
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = shim
+
+[Action]
+Description = Updating Shim installation...
+When = PostTransaction
+Exec = /usr/bin/bash -c 'cp /usr/share/shim/shimx64.efi.signed /boot/EFI/BOOT/BOOTX64.EFI && cp /usr/share/shim/mmx64.efi.signed /boot/EFI/BOOT/mmx64.efi'

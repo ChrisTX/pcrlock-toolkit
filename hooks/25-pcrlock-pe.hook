@@ -1,0 +1,23 @@
+# Re-lock boot loader binaries (components with Type=pe) when the packages
+# shipping them change.
+#
+# Type=pe components lock the unsigned binaries the packages ship: the PCR 4
+# measurement is the Authenticode hash, which excludes the signature, so it is
+# the same for the *.signed copies signing hooks create. This hook therefore
+# doesn't depend on any signing hook having run first.
+#
+# Named 25-* so it runs before systemd's 30-systemd-restart-marked.hook, which
+# restarts the marked systemd-pcrlock-make-policy.service once for the whole
+# transaction. Adjust the targets to the binaries your Type=pe components lock.
+
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = usr/share/shim/*.efi
+Target = usr/lib/systemd/boot/efi/systemd-boot*.efi
+
+[Action]
+Description = Updating pcrlock components for boot loaders...
+When = PostTransaction
+Exec = /usr/bin/pcrlock generate --type=pe --policy=mark

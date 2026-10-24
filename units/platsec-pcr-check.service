@@ -1,0 +1,38 @@
+#  Check and measure the memory protection baseline (memory encryption, IOMMU,
+#  pre-boot DMA protection) into the TPM before any disk is unlocked.
+#
+#  Runs only inside the initrd and is pulled in by the platsec dracut module.
+#  Configure PCR, checks and enforcement in /etc/pcrlock-toolkit/platsec.conf (the
+#  module copies it into the initrd); PLATSEC_* variables set via a drop-in
+#  override it. Rebuild the initrd and regenerate the pcrlock component after
+#  any change.
+#
+#  If the baseline is not met, or the check itself fails, the system powers
+#  off before any disk unlock prompt is shown. ENFORCE=0 stops the baseline
+#  from failing the unit; to also continue when the check itself errors, add
+#  a drop-in with:
+#    [Unit]
+#    FailureAction=none
+
+[Unit]
+Description=Measure and enforce memory protection baseline
+Documentation=man:systemd-pcrextend(8)
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+Wants=tpm2.target cryptsetup-pre.target
+After=tpm2.target systemd-tpm2-setup-early.service
+Before=cryptsetup-pre.target
+# PID 1 executes this directly, so no queued job can cancel it.
+FailureAction=poweroff-force
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/platsec-pcr-check
+# Make the warning visible on the console, not only in the journal.
+StandardError=journal+console
+# Covers the ccp wait (5s) and the warning delay (10s) with margin.
+TimeoutStartSec=30s
+
+[Install]
+WantedBy=initrd.target
