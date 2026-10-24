@@ -28,8 +28,21 @@ for a TPM2-unlocked system:
 | `/usr/share/libalpm/hooks/25-pcrlock-pe.hook` | re-locks boot loaders on package updates |
 | `pcrlock-prune.service` | runs `pcrlock prune` early at boot, before make-policy (opt-in) |
 | `/usr/lib/dracut/modules.d/91platsec`, `91pcr15seal` | initrd modules (opt-in) |
+| `/usr/lib/pcrlock-toolkit/mkosi-initrd/` | `initrd.target.wants` trees for the mkosi-initrd drop-ins |
 | `/etc/dkms/framework.conf.d/mok-signing.conf` | makes DKMS sign modules with `sign-file-tpm2` |
-| `/usr/share/pcrlock-toolkit/examples/` | example components, dracut configs and pacman hooks |
+| `/usr/share/pcrlock-toolkit/examples/` | example components, dracut and mkosi-initrd configs, pacman hooks |
+
+### mkosi-initrd
+
+With `initrd_generator=mkosi-initrd` in `/etc/kernel/install.conf`, use the
+drop-ins instead of the dracut modules: copy what applies from
+`/usr/share/pcrlock-toolkit/examples/mkosi-initrd/mkosi.conf.d/` to
+`/etc/mkosi-initrd/mkosi.conf.d/`, then rebuild the UKI (`kernel-install add-all`).
+They copy the script, the units and `platsec.conf` in with `ExtraTrees=` and
+add the `initrd.target.wants` symlinks, since mkosi-initrd presets every unit
+to disabled. Host drop-ins for the units aren't picked up automatically;
+uncomment the matching `ExtraTrees=` line. `rd.shell=` and `rd.emergency=`
+are dracut options and have no effect in a mkosi-initrd image.
 
 `examples/hardening/` in the source tree holds unrelated system hardening
 examples (kernel command line, sysctl, modprobe, sysusers, systemd and dracut

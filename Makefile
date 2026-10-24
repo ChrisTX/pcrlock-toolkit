@@ -41,6 +41,10 @@ install:
 	install -Dm644 units/pcrlock-prune.service         $(DESTDIR)$(UNITDIR)/pcrlock-prune.service
 	install -Dm755 dracut/91platsec/module-setup.sh    $(DESTDIR)$(DRACUTDIR)/91platsec/module-setup.sh
 	install -Dm755 dracut/91pcr15seal/module-setup.sh  $(DESTDIR)$(DRACUTDIR)/91pcr15seal/module-setup.sh
+	install -dm755 $(DESTDIR)$(LIBDIR)/mkosi-initrd/platsec/usr/lib/systemd/system/initrd.target.wants
+	ln -sf ../platsec-pcr-check.service $(DESTDIR)$(LIBDIR)/mkosi-initrd/platsec/usr/lib/systemd/system/initrd.target.wants/platsec-pcr-check.service
+	install -dm755 $(DESTDIR)$(LIBDIR)/mkosi-initrd/pcr15seal/usr/lib/systemd/system/initrd.target.wants
+	ln -sf ../initrd-pcr15-seal.service $(DESTDIR)$(LIBDIR)/mkosi-initrd/pcr15seal/usr/lib/systemd/system/initrd.target.wants/initrd-pcr15-seal.service
 	install -Dm644 conf/pcrlock.conf                   $(DESTDIR)$(CONFDIR)/pcrlock.conf
 	install -Dm644 conf/platsec.conf                   $(DESTDIR)$(CONFDIR)/platsec.conf
 	install -Dm644 conf/openssl-tpm2.cnf               $(DESTDIR)$(CONFDIR)/openssl-tpm2.cnf
@@ -49,4 +53,5 @@ install:
 	install -Dm644 -t $(DESTDIR)$(DATADIR)/examples/components.d examples/components.d/*.conf
 	install -Dm644 -t $(DESTDIR)$(DATADIR)/examples/dracut.conf.d examples/dracut.conf.d/*.conf
 	install -Dm644 -t $(DESTDIR)$(DATADIR)/examples/hooks examples/hooks/*.hook
+	install -Dm644 -t $(DESTDIR)$(DATADIR)/examples/mkosi-initrd/mkosi.conf.d examples/mkosi-initrd/mkosi.conf.d/*.conf
 	install -Dm644 README.md                           $(DESTDIR)$(DOCDIR)/README.md

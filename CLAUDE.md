@@ -181,6 +181,29 @@ policy the component was generated from, and `rd.hostonly=0` must not strip
 it. `check()` returns 255 (only when requested). Don't use `readonly` at
 module scope, because dracut may source module-setup.sh twice.
 
+**mkosi-initrd drop-ins** (`examples/mkosi-initrd/`; verified by a test
+build with mkosi 27.1, not yet booted). mkosi-initrd builds from repository packages, so a locally built
+toolkit package can't simply be added to `Packages=`; host files come in with
+`ExtraTrees=` instead (single files work, as mkosi-initrd's own crypttab
+handling shows). Its preset is `disable *` and `preset-all` runs after the
+extra trees are copied, so units are enabled by `initrd.target.wants`
+symlinks under `/usr/lib` (in `/usr/lib/pcrlock-toolkit/mkosi-initrd/<name>`),
+which presets don't remove. `systemd-pcrextend.socket` is statically enabled
+by the systemd package. The drop-ins are examples for `/etc/mkosi-initrd`,
+never installed to `/usr/lib/mkosi-initrd`, which would apply them to every
+build. Every `ExtraTrees=` source must exist, so host unit drop-ins are
+commented out.
+
+Checking an image: `systemctl --root=<dir> is-enabled` reports these units
+(and systemd's own `systemd-pcrextend.socket`) as `disabled`, because it
+ignores `.wants/` symlinks under `/usr/lib`, and `list-dependencies` refuses
+`--root=`. Use `SYSTEMD_UNIT_PATH=<dir>/etc/systemd/system:<dir>/usr/lib/systemd/system
+/usr/lib/systemd/systemd --test --system --unit=initrd.target` and look for
+`Wants:` under `initrd.target`. Build with `-t cpio`: mkosi 27.1's
+`-t directory` crashes copying the result out. Running mkosi-initrd
+unprivileged fails on repositories that need the host keyring, and local
+`file://` repositories aren't visible in its sandbox.
+
 **platsec checks.**
 
 - **Memory encryption.** AMD: `ccp` `tsme_status`, waiting up to 5s for the
