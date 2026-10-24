@@ -587,12 +587,6 @@ run_component() {
     install_variant "$out" "$target" "$keep"
 }
 
-# pcr_value_counts: prints "PCR<TAB>VALUES" for every PCR the policy covers.
-# Mirrors make-policy: components before the --location= start are always
-# measured, the boot may stop after any component up to the end, and later
-# ones are ignored. Each stop adds the product of the variant counts so far
-# (counting variants that differ on that PCR), unless the component doesn't
-# touch the PCR. That's an upper bound; coinciding values aren't detected.
 # pcr_list LIST...: expands PCR lists ("0-5,7", "0+7", "0 1 11") into one
 # number per line, sorted and unique.
 pcr_list() {
@@ -633,6 +627,12 @@ make_policy_argv() {
     read_pcrs mp_pcrs "${pcrs[@]:-$DEFAULT_PCRS}"
 }
 
+# pcr_value_counts: prints "PCR<TAB>VALUES" for every PCR the policy covers.
+# Mirrors make-policy: components before the --location= start are always
+# measured, the boot may stop after any component up to the end, and later
+# ones are ignored. Each stop adds the product of the variant counts so far
+# (counting variants that differ on that PCR), unless the component doesn't
+# touch the PCR. That's an upper bound; coinciding values aren't detected.
 pcr_value_counts() {
     local start end id path mask_json
     make_policy_argv
