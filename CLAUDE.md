@@ -26,6 +26,10 @@ without a reason.
   `examples/dracut.conf.d/`, whose `*.conf` users are told to copy wholesale.
 - `libexec/sign-file-tpm2` + `conf/openssl-tpm2.cnf`: DKMS signing with a
   TPM2 key. Unrelated to pcrlock; may move to its own package.
+  `conf/mok-signing.conf` installs to `/etc/dkms/framework.conf.d/` (a
+  `backup=` file), so DKMS signs with `sign-file-tpm2` as soon as the package
+  is installed. This is a deliberate exception to "everything is opt-in";
+  DKMS dictates the directory, so the toolkit-owned-name rule doesn't apply.
 
 ```text
 make check                      # bash -n / sh -n, then shellcheck — must pass, makepkg runs it
@@ -244,8 +248,13 @@ copy of the success variant (`Type=copy`, `500-separator-no-error`).
   BootOrder/BBS variants), the PCR 7 secure-boot authority split, dbx update
   variants, and an optional drop of the empty `700-action-efi-exit-boot-services`
   variant.
-- **Packaging.** License TBD (`LicenseRef-TBD`). `PKGBUILD` builds from the
-  working tree; switch to a tagged source before publishing.
+- **Packaging.** `PKGBUILD` builds from the working tree; switch to a tagged
+  source before publishing.
+
+## Licensing
+
+Everything is 0BSD, declared for all files in `REUSE.toml` (no per-file
+headers). Keep `reuse lint` passing; new files are covered by the `**` glob.
 
 Upstream issue/PR text: the maintainer rewrites drafts in their own words, so
 provide complete checklists of points rather than polished prose.

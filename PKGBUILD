@@ -9,7 +9,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Tools around systemd-pcrlock: declarative component generation, UKI locking, initrd platform security baseline and PCR 15 initrd seal"
 arch=('any')
-license=('LicenseRef-TBD')  # TODO: pick a license before publishing
+license=('0BSD')
 depends=(
   'bash'
   'systemd'    # systemd-pcrlock, systemd-pcrextend, varlinkctl
@@ -31,6 +31,7 @@ backup=(
   'etc/pcrlock-toolkit/pcrlock.conf'
   'etc/pcrlock-toolkit/platsec.conf'
   'etc/pcrlock-toolkit/openssl-tpm2.cnf'
+  'etc/dkms/framework.conf.d/mok-signing.conf'
 )
 install=pcrlock-toolkit.install
 
@@ -40,4 +41,5 @@ check() {
 
 package() {
   make -C "$startdir" DESTDIR="$pkgdir" install
+  install -Dm644 "$startdir/LICENSES/0BSD.txt" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

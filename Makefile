@@ -44,6 +44,7 @@ install:
 	install -Dm644 conf/pcrlock.conf                   $(DESTDIR)$(CONFDIR)/pcrlock.conf
 	install -Dm644 conf/platsec.conf                   $(DESTDIR)$(CONFDIR)/platsec.conf
 	install -Dm644 conf/openssl-tpm2.cnf               $(DESTDIR)$(CONFDIR)/openssl-tpm2.cnf
+	install -Dm644 conf/mok-signing.conf               $(DESTDIR)$(SYSCONFDIR)/dkms/framework.conf.d/mok-signing.conf
 	install -dm755                                     $(DESTDIR)$(CONFDIR)/components.d
 	install -Dm644 -t $(DESTDIR)$(DATADIR)/examples/components.d examples/components.d/*.conf
 	install -Dm644 -t $(DESTDIR)$(DATADIR)/examples/dracut.conf.d examples/dracut.conf.d/*.conf

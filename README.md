@@ -11,7 +11,8 @@ for a TPM2-unlocked system:
   initrd, measures it, and powers off if it isn't met.
 - **`initrd-pcr15-seal.service`** + dracut module `pcr15seal`: extends a
   separator into PCR 15 at the end of the initrd.
-- **`sign-file-tpm2`**: DKMS module signing with a TPM2-held key.
+- **`sign-file-tpm2`**: DKMS module signing with a TPM2-held key, enabled by
+  `/etc/dkms/framework.conf.d/mok-signing.conf`. Adjust the key paths there.
 
 ## Layout
 
@@ -27,6 +28,7 @@ for a TPM2-unlocked system:
 | `/usr/share/libalpm/hooks/25-pcrlock-pe.hook` | re-locks boot loaders on package updates |
 | `pcrlock-prune.service` | runs `pcrlock prune` early at boot, before make-policy (opt-in) |
 | `/usr/lib/dracut/modules.d/91platsec`, `91pcr15seal` | initrd modules (opt-in) |
+| `/etc/dkms/framework.conf.d/mok-signing.conf` | makes DKMS sign modules with `sign-file-tpm2` |
 | `/usr/share/pcrlock-toolkit/examples/` | example components, dracut configs and pacman hooks |
 
 `examples/hardening/` in the source tree holds unrelated system hardening
