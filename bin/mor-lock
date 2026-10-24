@@ -1,0 +1,152 @@
+#!/bin/sh
+# mor-lock: request a memory wipe on the next reset (MOR) and lock that request
+# without a key (MOR Lock), as described in the TCG Platform Reset Attack
+# Mitigation spec, then measure the resulting state into a TPM PCR.
+#
+#   MemoryOverwriteRequestControl-e20939be-...      bit 0 ClearMemory  -> mor=<state>
+#   MemoryOverwriteRequestControlLock-bb983ccf-...  1 = locked, no key -> morlock=<state>
+#
+# Locking MOR at 0 would protect nothing, so ClearMemory is set first. Once
+# locked, nothing can clear it before the next reset, so the firmware wipes
+# memory on every reboot, clean or not. The firmware resets the lock at boot,
+# which is why this runs on every boot, in the initrd, before any disk is
+# unlocked.
+#
+# The lock is only reported as "locked" if the firmware refuses a test write
+# that clears ClearMemory; a firmware that stores the lock variable but
+# ignores it is reported as "unenforced".
+#
+# The measured event is "mor=<state>;morlock=<state>", e.g. "mor=on;morlock=locked".
+# Something is always measured. States:
+#   mor:     on, off, absent (firmware has no MOR), unknown
+#   morlock: locked, keyed (locked with a key by someone else), unlocked,
+#            unenforced, absent, unknown
+# Exit status is 0 only for "mor=on;morlock=locked". The PCR 15 policy is what
+# enforces it: any other state doesn't match the pcrlock component.
+#
+# Matching pcrlock component (Type=raw, see examples/components.d/785-mor-lock.conf):
+#   Text=mor=on;morlock=locked
+set -eu
+
+PCREXTEND=/usr/lib/systemd/systemd-pcrextend
+EFIVARS=/sys/firmware/efi/efivars
+MOR=$EFIVARS/MemoryOverwriteRequestControl-e20939be-32d4-41be-a150-897f85d49829
+MORLOCK=$EFIVARS/MemoryOverwriteRequestControlLock-bb983ccf-151d-40e1-a07b-4a17be168292
+
+pcr=15
+mode=lock
+force=0
+
+usage() {
+    cat <<EOF
+Usage: ${0##*/} [OPTIONS]
+
+Set MOR ClearMemory, lock it without a key, and measure the state.
+
+  --status          Print the current state and exit (0 if locked as
+                    required, 1 otherwise). Writes nothing, so a lock the
+                    firmware doesn't enforce still shows as "locked".
+  --pcr=N           PCR to extend (default: 15).
+  --force           Allow running outside the initrd.
+EOF
+}
+
+die() { echo "${0##*/}: $*" >&2; exit 1; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --status) mode=status ;;
+    --pcr=*) pcr=${1#--pcr=} ;;
+    --force) force=1 ;;
+    -h | --help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
+case "$pcr" in '' | *[!0-9]*) die "invalid PCR: '$pcr'" ;; esac
+[ "$pcr" -le 23 ] || die "invalid PCR: '$pcr'"
+
+# efivarfs files are 4 bytes of attributes (little endian) followed by the data.
+# read_var FILE: prints "ATTR VALUE" as decimals, or nothing if unreadable.
+read_var() {
+    [ -r "$1" ] || return 0
+    # shellcheck disable=SC2046 # word splitting gives one argument per byte
+    set -- $(od -An -tu1 -N5 "$1" 2>/dev/null)
+    [ $# -eq 5 ] || return 0
+    [ "$2" -eq 0 ] && [ "$3" -eq 0 ] && [ "$4" -eq 0 ] || return 0
+    echo "$1 $5"
+}
+
+# write_var FILE ATTR VALUE: one write() of attributes + one data byte.
+# efivarfs marks these variables immutable, so lift that for the write.
+write_var() {
+    chattr -i "$1" 2>/dev/null || true
+    rc=0
+    # shellcheck disable=SC2059 # the format is built from octal escapes on purpose
+    { printf "\\$(printf %03o "$2")\\000\\000\\000\\$(printf %03o "$3")" >"$1"; } 2>/dev/null || rc=1
+    chattr +i "$1" 2>/dev/null || true
+    return "$rc"
+}
+
+mor_state() {
+    v=$(read_var "$MOR")
+    if [ ! -e "$MOR" ]; then echo absent
+    elif [ -z "$v" ]; then echo unknown
+    elif [ $((${v#* } & 1)) -eq 1 ]; then echo on
+    else echo off
+    fi
+}
+
+morlock_state() {
+    v=$(read_var "$MORLOCK")
+    if [ ! -e "$MORLOCK" ]; then echo absent; return; fi
+    case "${v#* }" in
+    0) echo unlocked ;;
+    1)
+        # Probe: a working lock refuses to clear ClearMemory. If the write goes
+        # through, put the old value back and report the lock as unenforced.
+        # --status writes nothing, so it can't tell locked from unenforced.
+        if [ "$mode" = status ]; then echo locked; return; fi
+        m=$(read_var "$MOR")
+        if [ -n "$m" ] && write_var "$MOR" "${m% *}" $((${m#* } & ~1)); then
+            write_var "$MOR" "${m% *}" "${m#* }" || true
+            echo unenforced
+        else
+            echo locked
+        fi
+        ;;
+    2) echo keyed ;;
+    *) echo unknown ;;
+    esac
+}
+
+if [ "$mode" = lock ]; then
+    [ -e /etc/initrd-release ] || [ "$force" -eq 1 ] ||
+        die "refusing to lock MOR and extend PCR $pcr outside the initrd (use --force, or --status to just check)"
+
+    # Never create the variables: on firmware without MOR support that would
+    # only add an ordinary NV variable and report a protection that isn't there.
+    if m=$(read_var "$MOR") && [ -n "$m" ] && [ $((${m#* } & 1)) -eq 0 ]; then
+        write_var "$MOR" "${m% *}" $((${m#* } | 1)) ||
+            echo "${0##*/}: failed to set MOR ClearMemory" >&2
+    fi
+    if l=$(read_var "$MORLOCK") && [ -n "$l" ] && [ "${l#* }" -eq 0 ]; then
+        write_var "$MORLOCK" "${l% *}" 1 ||
+            echo "${0##*/}: failed to set MOR Lock" >&2
+    fi
+fi
+
+event="mor=$(mor_state);morlock=$(morlock_state)"
+
+if [ "$mode" = status ]; then
+    echo "$event"
+    [ "$event" = "mor=on;morlock=locked" ]
+    exit
+fi
+
+"$PCREXTEND" --pcr="$pcr" "$event"
+
+[ "$event" = "mor=on;morlock=locked" ] && exit 0
+echo "${0##*/}: MOR protection not in place ($event); TPM-sealed secrets bound to it won't unlock" >&2
+exit 1

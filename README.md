@@ -9,6 +9,11 @@ for a TPM2-unlocked system:
 - **`platsec-pcr-check`** + dracut module `platsec`: checks the platform
   security baseline (memory encryption, IOMMU, pre-boot DMA protection) in the
   initrd, measures it, and powers off if it isn't met.
+- **`mor-lock`** + dracut module `morlock`: in the initrd, asks the firmware
+  to wipe memory on the next reset (MOR) and locks that request (MOR Lock, no
+  key), then measures the result into PCR 15. The firmware then wipes memory
+  on every reboot, which can make reboots noticeably slower with a lot of RAM.
+  `mor-lock --status` shows the current state.
 - **`initrd-pcr15-seal.service`** + dracut module `pcr15seal`: extends a
   separator into PCR 15 at the end of the initrd.
 - **`sign-file-tpm2`**: DKMS module signing with a TPM2-held key, enabled by
@@ -20,6 +25,7 @@ for a TPM2-unlocked system:
 |---|---|
 | `/usr/bin/pcrlock` | component generator CLI |
 | `/usr/bin/platsec-pcr-check` | baseline check (initrd and `--status` on the host) |
+| `/usr/bin/mor-lock` | MOR set + lock (initrd and `--status` on the host) |
 | `/etc/pcrlock-toolkit/pcrlock.conf` | global settings for `pcrlock` |
 | `/etc/pcrlock-toolkit/components.d/*.conf` | one file per component |
 | `/etc/pcrlock-toolkit/platsec.conf` | platsec settings (copied into the initrd) |
@@ -27,7 +33,7 @@ for a TPM2-unlocked system:
 | `/usr/lib/kernel/install.d/99-pcrlock.install` | locks UKIs on kernel install/removal |
 | `/usr/share/libalpm/hooks/25-pcrlock-pe.hook` | re-locks boot loaders on package updates |
 | `pcrlock-prune.service` | runs `pcrlock prune` early at boot, before make-policy (opt-in) |
-| `/usr/lib/dracut/modules.d/91platsec`, `91pcr15seal` | initrd modules (opt-in) |
+| `/usr/lib/dracut/modules.d/91platsec`, `91morlock`, `91pcr15seal` | initrd modules (opt-in) |
 | `/usr/lib/pcrlock-toolkit/mkosi-initrd/` | `initrd.target.wants` trees for the mkosi-initrd drop-ins |
 | `/etc/dkms/framework.conf.d/mok-signing.conf` | makes DKMS sign modules with `sign-file-tpm2` |
 | `/usr/share/pcrlock-toolkit/examples/` | example components, dracut and mkosi-initrd configs, pacman hooks |

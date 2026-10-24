@@ -14,10 +14,12 @@ without a reason.
 - `bin/platsec-pcr-check`: POSIX sh, runs in the initrd. Checks memory
   encryption (TSME/TME), IOMMU and pre-boot DMA, measures one event, powers off
   if the baseline isn't met.
-- `units/`: `platsec-pcr-check.service`, `initrd-pcr15-seal.service`,
-  `pcrlock-prune.service`.
-- `dracut/91platsec`, `dracut/91pcr15seal`: initrd modules, opt-in via
-  `add_dracutmodules`.
+- `bin/mor-lock`: POSIX sh, runs in the initrd. Sets MOR ClearMemory, locks it
+  without a key and measures the resulting state.
+- `units/`: `platsec-pcr-check.service`, `mor-lock.service`,
+  `initrd-pcr15-seal.service`, `pcrlock-prune.service`.
+- `dracut/91platsec`, `dracut/91morlock`, `dracut/91pcr15seal`: initrd
+  modules, opt-in via `add_dracutmodules`.
 - `kernel-install/99-pcrlock.install`: thin wrapper around `pcrlock uki`.
 - `hooks/25-pcrlock-pe.hook`: pacman hook. `examples/hooks/` are *not* installed
   as hooks.
@@ -73,17 +75,20 @@ happened yet.
 
 | Prio | Component | Measured by | When |
 |---|---|---|---|
+| 785 | mor-lock (`mor=on;morlock=locked`) | `mor-lock.service` | initrd, before platsec |
 | 790 | platsec | `platsec-pcr-check` | initrd, before `cryptsetup-pre.target` |
 | 795 | cryptsetup-root (volume-key) | systemd-cryptsetup | initrd, after root unlock |
 | 799 | initrd-seal (`initrd-sealed`) | `initrd-pcr15-seal.service` | end of initrd, after `cryptsetup.target` |
 | 820 | system-identity | pcrmachine + pcrfs, merged | after switch-root |
 | 841+ | cryptsetup-<vol> | systemd-cryptsetup | after switch-root, serialized |
 
-- Root unlocks against the state with only 790. Later disks unlock against
-  790+795+799+820(+previous disks), so their unlocks must be **serialized** and
+- Root unlocks against the state with only 785+790. Later disks unlock against
+  785+790+795+799+820(+previous disks), so their unlocks must be **serialized** and
   the component numbers must follow the unlock order.
-- 790 sits before the window on purpose: memory encryption off means no
-  unlock at all, and it adds no PCR 15 branches.
+- 785 and 790 sit before the window on purpose: no MOR lock or memory
+  encryption off means no unlock at all, and they add no PCR 15 branches.
+  `mor-lock.service` is ordered `Before=platsec-pcr-check.service`, so the two
+  events always come in component order.
 - The 820 merge exists to cut PCR 15 states: nothing unlocks between
   machine-id and file-system measurements. Users must disable
   `systemd-pcrlock-machine-id.service` and `systemd-pcrlock-file-system.service`,
@@ -221,9 +226,32 @@ unprivileged fails on repositories that need the host keyring, and local
 - **Running on the host.** Refuses to extend outside the initrd without
   `--force`.
 
+**MOR lock.** `mor-lock` sets `MemoryOverwriteRequestControl` bit 0
+(ClearMemory) and then `MemoryOverwriteRequestControlLock` to 1 (locked, no
+key), as Windows does with BitLocker. Locking with ClearMemory at 0 would
+protect nothing; the kernel's `CONFIG_RESET_ATTACK_MITIGATION` (off on the
+reference kernel) would set it in the EFI stub, but userspace would then have
+to clear it on clean shutdown, which the lock forbids. The cost is a firmware
+memory wipe on every reboot. Details that matter:
+- efivarfs data is 4 bytes of attributes plus the value, written in one
+  `write()`, and the kernel marks these variables immutable, so each write is
+  wrapped in `chattr -i`/`+i` (`chattr` from e2fsprogs is needed in the initrd).
+- Variables that don't exist are never created: on firmware without MOR that
+  would just add an ordinary NV variable and fake the protection.
+- "locked" is only reported after a probe write that clears ClearMemory is
+  refused. If the write goes through, the old value is restored and the state
+  is `unenforced`. `--status` doesn't probe, since it must not write.
+- No `FailureAction=`, unlike platsec: every state is measured, and anything
+  but `mor=on;morlock=locked` fails the PCR 15 policy, so the disks stay
+  locked without powering off. The unit still fails for the journal.
+
 **Separator error variant.** pcrlock ignores `/dev/null` symlinks for variant
 files, so the `0xFFFFFFFF` separator variant is overridden with a same-named
-copy of the success variant (`Type=copy`, `500-separator-no-error`).
+copy of the success variant (`Type=copy`, `500-separator-no-error`). The
+same trick replaces the empty `600-absent` variant of
+`700-action-efi-exit-boot-services` with a copy of `300-present`
+(`700-exit-boot-services-present`): firmware that doesn't log the
+ExitBootServices events is buggy, not a configuration to accept.
 
 ## pcrlock / TPM facts worth remembering
 
@@ -261,6 +289,9 @@ copy of the success variant (`Type=copy`, `500-separator-no-error`).
   `systemd-pcrlock log --pcr=15` for a ✓ on 799.
 - **`lock-file-system <path> --pcrlock=`** with one call per mount point
   (used by `Type=identity`).
+- **mor-lock on real firmware.** Only tested against a fake efivarfs. Check
+  that efivarfs accepts the writes, that the probe write is refused once the
+  lock is set, and how long the memory wipe adds to a reboot.
 - **`bin/pcrlock` against the real `systemd-pcrlock`.** It has only run
   against stubs.
 
@@ -276,9 +307,8 @@ copy of the success variant (`Type=copy`, `500-separator-no-error`).
   `systemd-boot*.efi.signed`. Until then, an ESP copy hook is needed
   (`examples/hooks/22-update-systemd-boot.hook`).
 - **Not covered by the toolkit yet.** PCR 1 (SMBIOS/firmware config,
-  BootOrder/BBS variants), the PCR 7 secure-boot authority split, dbx update
-  variants, and an optional drop of the empty `700-action-efi-exit-boot-services`
-  variant.
+  BootOrder/BBS variants), the PCR 7 secure-boot authority split, and dbx
+  update variants.
 - **Packaging.** `PKGBUILD` builds from the working tree; switch to a tagged
   source before publishing.
 

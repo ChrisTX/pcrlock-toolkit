@@ -1,0 +1,33 @@
+#  Request a memory wipe on the next reset (MOR ClearMemory), lock it without a
+#  key (MOR Lock), and measure the resulting state into PCR 15.
+#
+#  Runs only inside the initrd and is pulled in by the morlock dracut module
+#  (or the mkosi-initrd drop-in). Ordered before platsec-pcr-check.service, so
+#  the two PCR 15 events always appear in the same order, and before any disk
+#  is unlocked.
+#
+#  No FailureAction=: a missing or unenforced lock is measured, and the PCR 15
+#  policy (component 785-mor-lock) refuses to unlock. The unit still fails so
+#  the problem shows up in the journal.
+#
+#  With the lock set, the firmware wipes memory on every reboot, which can add
+#  noticeable time to each boot on machines with a lot of RAM.
+
+[Unit]
+Description=Lock memory overwrite request and measure it
+Documentation=file:///usr/share/doc/pcrlock-toolkit/README.md
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+Wants=tpm2.target cryptsetup-pre.target
+After=tpm2.target systemd-tpm2-setup-early.service sys-firmware-efi-efivars.mount
+Before=cryptsetup-pre.target platsec-pcr-check.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/mor-lock
+StandardError=journal+console
+TimeoutStartSec=30s
+
+[Install]
+WantedBy=initrd.target
