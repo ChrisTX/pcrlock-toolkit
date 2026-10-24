@@ -285,20 +285,34 @@ ExitBootServices events is buggy, not a configuration to accept.
   "Failed to allocate policy session" (TPM 0x9a2). PolicyAuthorizeNV 0x84
   means the submitted policy differs from the one stored in the NV index.
 
+## Verified on the reference machine
+
+As of October 2026 (AMD, systemd 262, dracut with the pcrextend socket fix),
+one full boot with the generated policy:
+
+- `bin/pcrlock` against the real `systemd-pcrlock`, including the
+  kernel-install plugin; every component generated as expected.
+- platsec in a real initrd on the AMD path (TSME, IVRS):
+  `tsme=on;iommu=on;preboot_dma=on`.
+- mor-lock on real firmware: efivarfs accepts the writes and the probe write
+  is refused once locked (`mor=on;morlock=locked`).
+- The seal's Varlink measurement matches the `lock-raw` component (799).
+- `lock-file-system` with one call per mount point (`/` and `/var` both match
+  820).
+- The serialized unlock order: root against 785+790, then `secondary` (841)
+  and `extra` (842) against the full chain.
+
+Reading `systemd-pcrlock log`: the component column is what matters, since it
+means the record's digest matched that component. The ✓/✗ column only checks
+the logged content against the digest. ✗ is expected for volume-key records
+(the content isn't the hashed data), and the seal shows `-` there.
+
 ## Not yet verified on real hardware
 
-- **platsec in a real initrd**, the Intel TME path, and the Intel DMAR offset
-  (only AMD/IVRS was exercised against fake sysfs).
-- **The seal's measurement.** Whether `varlinkctl … {"text":"initrd-sealed"}`
-  hashes the same bytes as `printf %s initrd-sealed | lock-raw`. Check
-  `systemd-pcrlock log --pcr=15` for a ✓ on 799.
-- **`lock-file-system <path> --pcrlock=`** with one call per mount point
-  (used by `Type=identity`).
-- **mor-lock on real firmware.** Only tested against a fake efivarfs. Check
-  that efivarfs accepts the writes, that the probe write is refused once the
-  lock is set, and how long the memory wipe adds to a reboot.
-- **`bin/pcrlock` against the real `systemd-pcrlock`.** It has only run
-  against stubs.
+- The Intel paths of platsec: TME via MSR 0x982 and the DMAR flags offset
+  (only exercised against fake sysfs).
+- How long the MOR memory wipe adds to a reboot.
+- A booted mkosi-initrd image (only test-built).
 
 ## Open items
 
