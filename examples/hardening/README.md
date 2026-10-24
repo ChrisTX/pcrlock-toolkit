@@ -49,7 +49,9 @@ Rebuilding the UKI also re-locks it through `99-pcrlock.install`.
 - `apparmor=1`: AppArmor on, matching the list above.
 - `lockdown=integrity`: blocks userspace from modifying the running kernel
   (unsigned modules, `/dev/mem`, unsigned kexec, …). `confidentiality` blocks
-  more and has broken IKEv2 MOBIKE in practice.
+  any facility to read kernel memory on top. It will disable Kprobes,
+  and XFRM secrets cannot be read back to userspace, which breaks MOBIKE with
+  IPsec IKEv2.
 - `module.sig_enforce=1`: only load signed modules, whatever the lockdown
   state. DKMS modules must be signed with a key the kernel trusts, e.g. a MOK
   via `sign-file-tpm2` and `/etc/dkms/framework.conf.d/mok-signing.conf`.
@@ -65,7 +67,8 @@ Rebuilding the UKI also re-locks it through `99-pcrlock.install`.
 ### Kernel self-protection (see KSPP, kernel-hardening-checker)
 - `bdev_allow_write_mounted=0`: no writes to block devices that are mounted.
 - `cfi=kcfi`: kernel control-flow integrity mode. Only takes effect on kernels
-  built with CFI support.
+  built with CFI support. Currently this needs a Clang build kernel,
+  but the feature is expected to land in GCC 17. Does not harm enabling.
 - `debugfs=off`: no debugfs.
 - `efi=disable_early_pci_dma`: the EFI stub clears bus mastering on PCI
   bridges, closing a DMA window before the IOMMU is up.
