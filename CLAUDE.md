@@ -27,7 +27,7 @@ without a reason.
 - `libexec/sign-file-tpm2` + `conf/openssl-tpm2.cnf`: DKMS signing with a
   TPM2 key. Unrelated to pcrlock; may move to its own package.
 
-```
+```text
 make check                      # bash -n / sh -n, then shellcheck — must pass, makepkg runs it
 make install DESTDIR=/tmp/x     # staged install to inspect the layout
 makepkg -si                     # PKGBUILD builds from the working tree ($startdir)
@@ -60,7 +60,7 @@ add a real `tests/`) before changing generation or prune logic.
 
 ## Measurement layout (PCR 15)
 
-Reference location window: `make-policy --location=791:940-`, set in a drop-in
+Reference location window: `make-policy --strict=yes --location=791:940-`, set in a drop-in
 for `systemd-pcrlock-make-policy.service`, never in this tool. Components
 before 791 are mandatory; components in the window may or may not have
 happened yet.
@@ -143,6 +143,7 @@ components. The policy is only touched if something changed. `Type=platsec`
 refuses to lock a state where `--status` isn't met.
 
 **Fail closed in the initrd.**
+
 - platsec: `FailureAction=poweroff-force`. Poweroff, not reboot, because the
   cause is a firmware setting and a reboot would loop. It always measures
   first, then fails, so a PIN or recovery key is never typed into a machine
@@ -169,6 +170,7 @@ it. `check()` returns 255 (only when requested). Don't use `readonly` at
 module scope, because dracut may source module-setup.sh twice.
 
 **platsec checks.**
+
 - **Memory encryption.** AMD: `ccp` `tsme_status`, waiting up to 5s for the
   driver to bind. Intel: MSR `IA32_TME_ACTIVATE` (0x982). It must be enabled
   and locked, with bypass off; bypass on means KeyID 0 is unencrypted.
