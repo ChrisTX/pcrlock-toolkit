@@ -14,6 +14,11 @@ readonly PROG=${0##*/}
 readonly VERSION=0.1.0
 readonly PCRLOCK=/usr/lib/systemd/systemd-pcrlock
 readonly MAKE_POLICY_UNIT=systemd-pcrlock-make-policy.service
+# make-policy builds one PolicyOR per PCR, and TPM2_PolicyOR takes at most 8
+# branches.
+readonly MAX_PCR_VALUES=8
+# systemd-pcrlock's default for --location=.
+readonly DEFAULT_LOCATION=760-:940-
 
 config_dir=/etc/pcrlock-toolkit
 
@@ -49,6 +54,9 @@ Commands:
                            component. Used by the kernel-install plugin.
   uki remove KVER          Remove the UKI variant KVER, unless it is the
                            running one (prune removes that after reboot).
+  check                    Show how many values each PCR can take in the
+                           policy (at most $MAX_PCR_VALUES). Also checked before
+                           every policy update.
 
 Options:
   --type=TYPE              generate: only components of this type.
@@ -71,6 +79,9 @@ Component types (Type= in components.d/*.conf):
   raw         fixed string, like systemd-pcrextend          PCR= Text=
   platsec     current output of platsec-pcr-check --status  [PCR=]
   copy        copy of an existing .pcrlock file             Source=
+  secureboot-policy
+              lock-secureboot-policy (PCR 7); only dbx may
+              differ from the current boot
 Common keys: Enabled=, Output=, KeepPrevious=, MinRecords=
 EOF
 }
@@ -170,7 +181,7 @@ load_component() {
     parse_kv_file "$f" component_kv
 
     case $c_type in
-    pe) : "${c_keep_previous:=yes}" ;;
+    pe | secureboot-policy) : "${c_keep_previous:=yes}" ;;
     log | volume-key | identity | raw | platsec | copy) : "${c_keep_previous:=no}" ;;
     '') die "$f: Type= missing" ;;
     *) die "$f: unknown Type '$c_type'" ;;
@@ -299,6 +310,35 @@ gen_platsec() {
     printf '%s' "$event" | "$PCRLOCK" lock-raw --pcr="$pcr" --pcrlock="$1"
 }
 
+gen_secureboot_policy() {
+    local out=$1 f
+    "$PCRLOCK" lock-secureboot-policy --pcrlock="$out"
+    ensure_cel
+    # lock-secureboot-policy reads the current EFI variables, so after a dbx
+    # update it predicts the next boot. Only dbx is allowed to differ from the
+    # event log: a PK, KEK or db change isn't locked until a boot measured it.
+    # The dbx record is UEFI_VARIABLE_DATA with the image security database
+    # GUID, a name length of 3 and the name "dbx" (UTF-16LE).
+    # shellcheck disable=SC2016
+    jq -e --slurpfile cel "$CEL" '
+        def sha256: [.digests[]? | select(.hashAlg == "sha256") | .digest] | first;
+        def is_dbx: (.content.event_data // "")
+            | startswith("cbb219d73a3d9645a3bcdad00e67656f0300000000000000")
+              and .[64:76] == "640062007800";
+        [$cel[0][] | select(.pcr == 7 and .content.event_type? == "EV_EFI_VARIABLE_DRIVER_CONFIG")] as $log
+        | [.records[] | select(.pcr == 7)] as $new
+        | ($log | length) > 0
+          and ($log | length) == ($new | length)
+          and all(range($log | length);
+                  . as $i | ($log[$i] | is_dbx) or ($log[$i] | sha256) == ($new[$i] | sha256))
+    ' "$out" >/dev/null ||
+        die "$c_name: Secure Boot variables other than dbx differ from the current boot; only dbx updates are predicted (lock again after a reboot)"
+
+    for f in /var/lib/pcrlock.d/*-secureboot-policy.pcrlock /var/lib/pcrlock.d/*-secureboot-policy.pcrlock.d; do
+        warn "$f duplicates component '$c_name'; remove it and disable systemd-pcrlock-secureboot-policy.service"
+    done
+}
+
 gen_copy() {
     [[ -n $c_source ]] || die "$c_file: Source= missing"
     [[ -r $c_source ]] || die "$c_file: $c_source not readable"
@@ -356,6 +396,7 @@ run_component() {
     raw) gen_raw "$out" ;;
     platsec) gen_platsec "$out" ;;
     copy) gen_copy "$out" ;;
+    secureboot-policy) gen_secureboot_policy "$out" ;;
     esac
 
     got=$(jq '.records | length' "$out") || die "$c_name: generated file is not valid JSON"
@@ -363,6 +404,75 @@ run_component() {
         die "$c_name: produced $got record(s), expected at least $c_min_records; keeping the existing file"
     debug "$c_name: $got record(s)"
     install_variant "$out" "$target" "$keep"
+}
+
+# pcr_value_counts: prints "PCR<TAB>VALUES" for every PCR the policy covers.
+# Mirrors make-policy: components before the --location= start are always
+# measured, the boot may stop after any component up to the end, and later
+# ones are ignored. Each stop adds the product of the variant counts so far
+# (counting variants that differ on that PCR), unless the component doesn't
+# touch the PCR. That's an upper bound; coinciding values aren't detected.
+pcr_value_counts() {
+    local loc=$DEFAULT_LOCATION start end id path w mask_json='[]' args
+    local -a argv=() mask=() items
+    args=$(systemctl show -P ExecStart "$MAKE_POLICY_UNIT" 2>/dev/null |
+        sed -n 's/.*argv\[\]=\([^;]*\) ;.*/\1/p' | tail -n 1) || true
+    read -ra argv <<<"$args"
+    for w in "${argv[@]}"; do
+        case $w in
+        --location=*) loc=${w#*=} ;;
+        --pcr=*) IFS=,+ read -ra items <<<"${w#*=}"; mask+=("${items[@]}") ;;
+        esac
+    done
+    start=${loc%%:*}
+    end=${loc#*:}
+    if ((${#mask[@]})); then
+        mask_json=$(jq -nc '[$ARGS.positional[]
+            | if test("^[0-9]+-[0-9]+$") then (split("-") | map(tonumber) | range(.[0]; .[1] + 1))
+              else tonumber end]' --args "${mask[@]}") || die "can't parse --pcr= of $MAKE_POLICY_UNIT"
+    fi
+    debug "counting PCR values for --location=$start:$end, PCRs ${mask[*]:-all}"
+
+    "$PCRLOCK" list-components --json=short >"$tmp/components.json" ||
+        die "systemd-pcrlock list-components failed"
+    : >"$tmp/variants.jsonl"
+    while IFS=$'\t' read -r id path; do
+        jq -c --arg id "$id" '{id: $id, recs: [.records[]?
+            | {pcr, d: ([.digests[]? | select(.hashAlg == "sha256") | .digest] | first)}]}' \
+            "$path" >>"$tmp/variants.jsonl" || die "$path: not a pcrlock file"
+    done < <(jq -r '.[] | .id as $id
+        | (.variants | if type == "array" then .[] else . end) | [$id, .] | @tsv' "$tmp/components.json")
+
+    # shellcheck disable=SC2016
+    jq -rs --arg start "$start" --arg end "$end" --argjson mask "$mask_json" '
+        group_by(.id) as $comps
+        | [$comps[][].recs[].pcr] | unique | .[]
+        | . as $p
+        | select(($mask | length) == 0 or any($mask[]; . == $p))
+        | [$comps[] | {id: .[0].id,
+                       n: ([.[] | [.recs[] | select(.pcr == $p) | .d]] | unique | length),
+                       touches: any(.[].recs[]; .pcr == $p)}] as $c
+        | (reduce ($c[] | select(.id < $start) | .n) as $n (1; . * $n)) as $pre
+        | (reduce ($c[] | select(.id >= $start and .id <= $end and .touches)) as $w
+            ({acc: $pre, total: $pre}; .acc *= $w.n | .total += .acc)).total
+        | "\($p)\t\(.)"
+    ' "$tmp/variants.jsonl"
+}
+
+# check_budget: fails if a PCR could take more values than one PolicyOR holds.
+check_budget() {
+    local pcr n over=0 counts
+    counts=$(pcr_value_counts) || exit 1
+    while IFS=$'\t' read -r pcr n; do
+        [[ -n $pcr ]] || continue
+        debug "PCR $pcr: $n possible value(s)"
+        if ((n > MAX_PCR_VALUES)); then
+            warn "PCR $pcr can take $n values, more than the $MAX_PCR_VALUES a policy can hold"
+            over=1
+        fi
+    done <<<"$counts"
+    ((!over)) || warn "drop variants (e.g. 'pcrlock prune' after a reboot) or merge components; see 'pcrlock check'"
+    ((!over))
 }
 
 apply_policy() {
@@ -374,6 +484,12 @@ apply_policy() {
     fi
     if ((dry_run)); then
         log "would update the policy ($mode)"
+        return 0
+    fi
+    # make-policy would fail on too many branches anyway, but without saying
+    # which components caused it.
+    if ! check_budget; then
+        [[ $mode == none ]] || die "not updating the policy; the current one stays in place"
         return 0
     fi
     case $mode in
@@ -496,6 +612,22 @@ cmd_prune() {
     apply_policy
 }
 
+cmd_check() {
+    local pcr n state over=0 counts
+    counts=$(pcr_value_counts) || exit 1
+    printf '%-4s %-7s %s\n' PCR VALUES STATE
+    while IFS=$'\t' read -r pcr n; do
+        [[ -n $pcr ]] || continue
+        state=ok
+        if ((n > MAX_PCR_VALUES)); then
+            state="too many (max $MAX_PCR_VALUES)"
+            over=1
+        fi
+        printf '%-4s %-7s %s\n' "$pcr" "$n" "$state"
+    done <<<"$counts"
+    ((!over))
+}
+
 # valid_kver KVER: a kernel version usable as a variant file name. "-previous"
 # is reserved for the kept variant of the running kernel.
 valid_kver() {
@@ -584,6 +716,7 @@ main() {
     list) ((${#args[@]} == 0)) || die "list takes no arguments"; cmd_list ;;
     prune) ((${#args[@]} == 0)) || die "prune takes no arguments"; cmd_prune ;;
     uki) cmd_uki "${args[@]}" ;;
+    check) ((${#args[@]} == 0)) || die "check takes no arguments"; cmd_check ;;
     help) usage ;;
     *) die "unknown command: $cmd (see --help)" ;;
     esac

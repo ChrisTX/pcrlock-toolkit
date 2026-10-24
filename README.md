@@ -34,6 +34,7 @@ for a TPM2-unlocked system:
 | `/usr/lib/kernel/install.d/99-pcrlock.install` | locks UKIs on kernel install/removal |
 | `/usr/share/libalpm/hooks/25-pcrlock-pe.hook` | re-locks boot loaders on package updates |
 | `pcrlock-prune.service` | runs `pcrlock prune` early at boot, before make-policy (opt-in) |
+| `pcrlock-secureboot-policy.path` | regenerates the Secure Boot policy component when dbx changes (opt-in) |
 | `/usr/lib/dracut/modules.d/91platsec`, `91morlock`, `91pcr15seal` | initrd modules (opt-in) |
 | `/usr/lib/pcrlock-toolkit/mkosi-initrd/` | `initrd.target.wants` trees for the mkosi-initrd drop-ins |
 | `/usr/share/pcrlock-toolkit/examples/` | example components, dracut and mkosi-initrd configs, pacman hooks, DKMS signing config |
@@ -64,6 +65,7 @@ pcrlock list                   show components and whether they match this boot
 pcrlock prune                  drop -previous variants and UKIs of removed kernels
 pcrlock uki add KVER UKI [KERNEL]
 pcrlock uki remove KVER
+pcrlock check                  show how many values each PCR can take (max 8)
 ```
 
 Options: `--type=TYPE`, `--policy=now|mark|none`, `--dry-run`, `-v`.
@@ -71,6 +73,22 @@ After any change the policy is updated by restarting
 `systemd-pcrlock-make-policy.service` (`now`), marking it for pacman's
 restart-marked hook (`mark`), or not at all (`none`). Put make-policy options
 such as `--location=` into a drop-in for that service.
+
+### Policy size
+
+make-policy builds one TPM2 PolicyOR per PCR, and a PolicyOR takes at most 8
+branches. The number of values a PCR can take is the product of the variant
+counts of all components that measure into it, and inside the `--location=`
+window every point where the boot may stop adds its own value. A pending UKI,
+shim and systemd-boot update (each with a `-previous` variant) already uses
+all 8 for PCR 4.
+
+Before every policy update `pcrlock` counts this per PCR, using `--location=`
+and `--pcr=` from the make-policy unit, and refuses to update the policy if a
+PCR is over the limit. The current policy stays in place; `pcrlock prune`
+after the next reboot usually brings the count down again. `pcrlock check`
+shows the counts. They are upper bounds: variants that happen to produce the
+same value are counted twice.
 
 ### Boot loader updates and pruning
 
@@ -115,9 +133,58 @@ reboots. `pcrlock prune` removes it once it no longer matches.
 | `raw` | a fixed string, like `systemd-pcrextend` | `PCR=`, `Text=` |
 | `platsec` | the current `platsec-pcr-check --status` (refuses if not met) | `PCR=` (from platsec.conf) |
 | `copy` | a copy of an existing `.pcrlock` file | `Source=` |
+| `secureboot-policy` | `lock-secureboot-policy` (PCR 7); only dbx may differ from the current boot (KeepPrevious defaults to yes) | |
 
 Common keys: `Enabled=`, `Output=` (path relative to `/etc/pcrlock.d`),
 `KeepPrevious=`, `MinRecords=` (default 1).
 
 A failing component (for example a volume not unlocked via TPM this boot)
 keeps its existing file; the others still run.
+
+### Secure Boot policy and dbx updates
+
+PCR 7 starts with one record each for the `SecureBoot`, `PK`, `KEK`, `db` and
+`dbx` variables. A dbx update changes the variable right away, but the
+firmware measures it only on the next boot. `Type=secureboot-policy` locks the
+current variables, so after an update it predicts the next boot, and the
+variant of the running boot is kept as `-previous` until `pcrlock prune`.
+Only dbx is predicted: if `SecureBoot`, `PK`, `KEK` or `db` differ from what
+this boot measured, the component fails and keeps its file. Such changes
+need a recovery unlock on the next boot and a `pcrlock generate` after it.
+
+`examples/components.d/240-secureboot-policy.conf` uses the same name as
+systemd's own generated component. Remove that one and disable the unit that
+regenerates it:
+
+```text
+rm -r /var/lib/pcrlock.d/240-secureboot-policy.pcrlock.d
+systemctl disable systemd-pcrlock-secureboot-policy.service
+systemctl enable pcrlock-secureboot-policy.path
+```
+
+`pcrlock-secureboot-policy.path` runs `pcrlock generate --type=secureboot-policy`
+whenever the dbx variable changes, e.g. when fwupd applies a dbx update.
+fwupd's own `systemd-pcrlock` plugin (2.1.7+) instead asks systemd-pcrlock
+to drop its generated Secure Boot components before an update and relies on
+systemd's units to lock them again; it doesn't touch the files in
+`/etc/pcrlock.d`.
+
+Updates applied outside the running system (Windows, a firmware update that
+resets the keys) can't be predicted and need a recovery unlock too.
+
+**sbctl and fwupd.** sbctl can't enroll a dbx
+([Foxboron/sbctl#23](https://github.com/Foxboron/sbctl/issues/23)), so after
+`sbctl enroll-keys` the dbx variable doesn't exist at all (firmware measures
+it as empty). fwupd before 2.1.9 then showed the UEFI dbx device without a
+version and offered no dbx update
+([fwupd/fwupd#11057](https://github.com/fwupd/fwupd/issues/11057), fixed in
+[997c7e1](https://github.com/fwupd/fwupd/commit/997c7e132b25c23e37b557ff6e65ec17dee65d31)).
+With 2.1.9 the update shows up. The first one creates the variable.
+
+**Firmware resets.** systemd-boot can re-enroll your keys from `.auth` files
+in `loader/keys/auto/` on the ESP (`secure-boot-enroll` in `loader.conf`).
+It only does so in Setup Mode: a reset to the vendor's factory keys needs
+the keys cleared in the firmware setup first. If the enrolled variables match
+the old ones byte for byte, PCR 7 comes out the same. A `dbx.auth` there is a
+snapshot, though, so keep it in sync with every dbx update, or a re-enrollment
+rolls dbx back and changes PCR 7.

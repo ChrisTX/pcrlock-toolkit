@@ -8,7 +8,8 @@ without a reason.
 
 ## Layout and commands
 
-- `bin/pcrlock`: bash CLI (`generate`, `list`, `prune`, `uki add|remove`).
+- `bin/pcrlock`: bash CLI (`generate`, `list`, `prune`, `uki add|remove`,
+  `check`).
   Reads `/etc/pcrlock-toolkit/pcrlock.conf` and `components.d/*.conf`, writes
   to `/etc/pcrlock.d`.
 - `bin/platsec-pcr-check`: POSIX sh, runs in the initrd. Checks memory
@@ -17,7 +18,8 @@ without a reason.
 - `bin/mor-lock`: POSIX sh, runs in the initrd. Sets MOR ClearMemory, locks it
   without a key and measures the resulting state.
 - `units/`: `platsec-pcr-check.service`, `mor-lock.service`,
-  `initrd-pcr15-seal.service`, `pcrlock-prune.service`.
+  `initrd-pcr15-seal.service`, `pcrlock-prune.service`,
+  `pcrlock-secureboot-policy.{path,service}`.
 - `dracut/91platsec`, `dracut/91morlock`, `dracut/91pcr15seal`: initrd
   modules, opt-in via `add_dracutmodules`.
 - `kernel-install/99-pcrlock.install`: thin wrapper around `pcrlock uki`.
@@ -157,6 +159,33 @@ would stop `prune` from finding the kernel version.
 deadlock: restarting a unit ordered after itself. It sets `TMPDIR` to its
 `RuntimeDirectory` because `/tmp` may not be mounted yet.
 
+**Variant budget.** make-policy builds one PolicyOR per PCR, so each PCR can
+take at most 8 values (upstream discussion about cascading PolicyORs, not
+implemented). The count is the product of per-component variant counts
+(variants that differ on that PCR), summed over the stop points of the
+`--location=` window: the state before the window start, then after each
+window component that touches the PCR; components after the end are ignored.
+`pcr_value_counts` reads the real component set from
+`systemd-pcrlock list-components --json=short` (it resolves same-name
+overrides across `/etc`, `/var/lib`, `/usr/lib`) and `--location=`/`--pcr=`
+from the make-policy unit's `ExecStart=`, defaulting to `760-:940-`.
+`apply_policy` refuses `now` and `mark` when over budget (the old NV policy
+stays valid) and only warns with `none`. This is why PCR 7 support predicts
+dbx and SbatLevel only: variants for arbitrary db changes multiply past 8.
+
+**`Type=secureboot-policy`.** Wraps `lock-secureboot-policy`, which reads the
+current EFI variables, so after a runtime dbx update it predicts the next
+boot; `KeepPrevious=yes` keeps the booted variant. Every PCR 7
+`EV_EFI_VARIABLE_DRIVER_CONFIG` record must match the log position by
+position except dbx (identified by the image security database GUID and the
+UTF-16 name "dbx" in the event data). So PK/KEK/db changes made by anyone are
+never pre-accepted; they are locked only after a boot measured them. The
+example keeps systemd's name `240-secureboot-policy`: fwupd's pcrlock plugin
+matches component ids by the substring `secureboot-policy`. A same-named
+`/var/lib` directory would add its `generated.pcrlock` as an extra variant,
+so the type warns about it. `pcrlock-secureboot-policy.path` watches only
+dbx, for the same reason.
+
 **Failure handling in `generate`.** Each component runs in a subshell. A
 failing one (e.g. a volume not TPM-unlocked this boot) keeps its existing file,
 and the others still run. `MinRecords=` (default 1) prevents writing empty
@@ -278,6 +307,18 @@ ExitBootServices events is buggy, not a configuration to accept.
 - **fwupd false positive.** "TPM PCR0 reconstruction: Invalid" appears on any
   system running `systemd-pcrosseparator`: fwupd only replays
   `binary_bios_measurements` and ignores the runtime log.
+- **PCR 7 encoding** (checked against aurora and the RAID server). Every
+  record's digest is `sha256(event_data)`; variable events are
+  `UEFI_VARIABLE_DATA` (GUID, u64 name length, u64 data length, UTF-16LE name,
+  data). A missing dbx is measured with length 0. Authority records are
+  variable `db` whose data is the matching db `EFI_SIGNATURE_DATA` (owner GUID
+  and cert), so they can be rebuilt offline from the db variable; that
+  reproduced the logged digest on both machines.
+- **Late PCR 7 authorities with shim** are `[db, SbatLevel, db]`: firmware
+  verifying shim, shim's `SbatLevel-605dab50-…` as `EV_EFI_VARIABLE_AUTHORITY`
+  with the variable's text as data, then shim verifying systemd-boot against
+  db (shim doesn't deduplicate against the firmware's record). Without shim
+  it's a single db record.
 - **Volume-key records.** cryptsetup's PCR 15 volume-key record differs by
   unlock method in practice. The NvPCR keyslot record
   (`tpm2-measure-keyslot-nvpcr`) carries the keyslot index.
@@ -315,6 +356,12 @@ the logged content against the digest. ✗ is expected for volume-key records
 - The Intel paths of platsec: TME via MSR 0x982 and the DMAR flags offset
   (only exercised against fake sysfs).
 - A booted mkosi-initrd image (only test-built).
+- `Type=secureboot-policy` and the variant budget against the real
+  `systemd-pcrlock` (only stubs fed with aurora's real PCR 7 log). In
+  particular: that `lock-secureboot-policy` records come in log order, and
+  that the budget formula matches how make-policy counts the location window.
+- `pcrlock-secureboot-policy.path` firing on an efivarfs write (fwupd's dbx
+  update on the RAID server is the planned test).
 
 ## Open items
 
@@ -328,8 +375,21 @@ the logged content against the digest. ✗ is expected for volume-key records
   `systemd-boot*.efi.signed`. Until then, an ESP copy hook is needed
   (`examples/hooks/22-update-systemd-boot.hook`).
 - **Not covered by the toolkit yet.** PCR 1 (SMBIOS/firmware config,
-  BootOrder/BBS variants), the PCR 7 secure-boot authority split, and dbx
-  update variants.
+  BootOrder/BBS variants). PCR 7 plan, in this order:
+  - SbatLevel: on a shim update, read its `.sbatlevel` section, pick the level
+    shim will apply (`SbatPolicy`, default previous, only if newer than the
+    current `SbatLevel`), and write a whole alternative of 620 with only the
+    SbatLevel record swapped (same variant count as a split, no
+    record-position filters). Self-check: rebuild the current record first.
+  - Option ROM authorities before the separator (KVMs on the RAID server):
+    an early component with an empty variant plus one computed from db per
+    allowed CA (most likely Microsoft UEFI CA 2011).
+  - A dbx tool for a local-KEK setup: verify Microsoft's signed update,
+    diff against the current dbx, refuse if anything that boots is revoked
+    (`lock-pe` Authenticode hashes), sign the additions as an append write
+    with the local KEK, predict, and rewrite `loader/keys/auto/dbx.auth`.
+  - systemd PR 43420 (`NotifySecureBootUpdate`/`PrepareSecureBootUpdate`,
+    takes the update payload) may replace the prediction once merged.
 - **Packaging.** `PKGBUILD` builds from the working tree; switch to a tagged
   source before publishing.
 

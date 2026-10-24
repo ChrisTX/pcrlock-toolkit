@@ -1,0 +1,10 @@
+#  Started by pcrlock-secureboot-policy.path. The variant of the current boot
+#  is kept as -previous; pcrlock-prune.service drops it after the reboot.
+
+[Unit]
+Description=Lock the updated Secure Boot policy for pcrlock
+Documentation=file:///usr/share/doc/pcrlock-toolkit/README.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/pcrlock generate --type=secureboot-policy --policy=now

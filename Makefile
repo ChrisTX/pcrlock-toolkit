@@ -44,6 +44,8 @@ install:
 	install -Dm644 units/initrd-pcr15-seal.service     $(DESTDIR)$(UNITDIR)/initrd-pcr15-seal.service
 	install -Dm644 units/pcrlock-prune.service         $(DESTDIR)$(UNITDIR)/pcrlock-prune.service
 	install -Dm644 units/mor-lock.service              $(DESTDIR)$(UNITDIR)/mor-lock.service
+	install -Dm644 units/pcrlock-secureboot-policy.path  $(DESTDIR)$(UNITDIR)/pcrlock-secureboot-policy.path
+	install -Dm644 units/pcrlock-secureboot-policy.service $(DESTDIR)$(UNITDIR)/pcrlock-secureboot-policy.service
 	install -Dm755 dracut/91platsec/module-setup.sh    $(DESTDIR)$(DRACUTDIR)/91platsec/module-setup.sh
 	install -Dm755 dracut/91pcr15seal/module-setup.sh  $(DESTDIR)$(DRACUTDIR)/91pcr15seal/module-setup.sh
 	install -Dm755 dracut/91morlock/module-setup.sh    $(DESTDIR)$(DRACUTDIR)/91morlock/module-setup.sh

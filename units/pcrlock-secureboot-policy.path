@@ -1,0 +1,18 @@
+#  Regenerate the Secure Boot policy component when dbx changes, e.g. after
+#  fwupd applied a dbx update. lock-secureboot-policy reads the new variable
+#  right away, but the firmware only measures it on the next boot, so the
+#  policy has to accept both until then. Only dbx is watched: PK, KEK and db
+#  changes aren't predicted (see Type=secureboot-policy).
+#
+#  systemd watches the parent directory, so this also fires when a missing
+#  dbx variable is created.
+
+[Unit]
+Description=Watch dbx for pcrlock
+Documentation=file:///usr/share/doc/pcrlock-toolkit/README.md
+
+[Path]
+PathChanged=/sys/firmware/efi/efivars/dbx-d719b2cb-3d3a-4596-a3bc-dad00e67656f
+
+[Install]
+WantedBy=paths.target
