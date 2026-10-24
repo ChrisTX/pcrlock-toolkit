@@ -18,7 +18,7 @@ readonly MAKE_POLICY_UNIT=systemd-pcrlock-make-policy.service
 # branches.
 readonly MAX_PCR_VALUES=8
 # systemd-pcrlock's defaults for make-policy --location= and --pcr=.
-readonly DEFAULT_LOCATION=760-:940-
+readonly PCRLOCK_DEFAULT_LOCATION=760-:940-
 readonly DEFAULT_PCRS=0-5,7,11,13-15
 # suspend-firmware: a runtime drop-in for the make-policy unit (named to sort
 # after users' own drop-ins, which may set ExecStart= too), and the state file
@@ -38,6 +38,9 @@ opt_dir=/etc/pcrlock.d
 opt_policy=now
 opt_uki_component=650-uki
 opt_suspend_pcrs=0-3
+# The window make-policy must use: from 791 on, i.e. after mor-lock (785) and
+# platsec (790), so the policy never unlocks anything before those measured.
+opt_location=791:940-
 
 dry_run=0
 verbose=0
@@ -72,8 +75,10 @@ Commands:
   uki remove KVER          Remove the UKI variant KVER, unless it is the
                            running one (prune removes that after reboot).
   check                    Show how many values each PCR can take in the
-                           policy (at most $MAX_PCR_VALUES). Also checked before
-                           every policy update.
+                           policy (at most $MAX_PCR_VALUES), and whether
+                           make-policy uses --location=$opt_location (Location=
+                           in pcrlock.conf). Both are checked before every
+                           policy update.
   suspend-firmware [PCRS]  Take the firmware PCRs (default: SuspendPCRs= in
                            pcrlock.conf, else $opt_suspend_pcrs) out of the
                            policy until the next boot, for a firmware update.
@@ -154,6 +159,7 @@ global_kv() {
     Policy) opt_policy=$2 ;;
     UkiComponent) opt_uki_component=$2 ;;
     SuspendPCRs) opt_suspend_pcrs=$2 ;;
+    Location) opt_location=$2 ;;
     *) die "$3: unknown key '$1'" ;;
     esac
 }
@@ -165,6 +171,7 @@ load_global() {
     fi
     case $opt_policy in now | mark | none) ;; *) die "$f: Policy= must be now, mark or none" ;; esac
     [[ $opt_dir == /* ]] || die "$f: Directory= must be an absolute path"
+    [[ $opt_location =~ ^[^[:space:]]+$ ]] || die "$f: Location= must be a --location= value such as 791:940-"
 }
 
 # ---------------------------------------------------------------------------
@@ -617,7 +624,7 @@ make_policy_argv() {
     args=$(systemctl show -P ExecStart "$MAKE_POLICY_UNIT" 2>/dev/null |
         sed -n 's/.*argv\[\]=\([^;]*\) ;.*/\1/p' | tail -n 1) || true
     read -ra mp_argv <<<"$args"
-    mp_location=$DEFAULT_LOCATION
+    mp_location=$PCRLOCK_DEFAULT_LOCATION
     for w in "${mp_argv[@]}"; do
         case $w in
         --location=*) mp_location=${w#*=} ;;
@@ -667,6 +674,19 @@ pcr_value_counts() {
     ' "$tmp/variants.jsonl"
 }
 
+# check_location: fails if make-policy doesn't use the configured --location=.
+# This tool only restarts the unit, so the option has to be in its drop-in.
+check_location() {
+    make_policy_argv
+    [[ $mp_location != "$opt_location" ]] || return 0
+    warn "$MAKE_POLICY_UNIT uses --location=$mp_location, but Location= is $opt_location"
+    warn "add it to the unit with 'systemctl edit $MAKE_POLICY_UNIT':"
+    warn "  [Service]"
+    warn "  ExecStart="
+    warn "  ExecStart=/usr/lib/systemd/systemd-pcrlock make-policy --location=$opt_location --strict=yes"
+    return 1
+}
+
 # check_budget: fails if a PCR could take more values than one PolicyOR holds.
 check_budget() {
     local pcr n over=0 counts
@@ -697,7 +717,7 @@ apply_policy() {
     fi
     # make-policy would fail on too many branches anyway, but without saying
     # which components caused it.
-    if ! check_budget; then
+    if ! check_location || ! check_budget; then
         [[ $mode == none ]] || die "not updating the policy; the current one stays in place"
         return 0
     fi
@@ -825,6 +845,7 @@ cmd_prune() {
 cmd_check() {
     local pcr n state over=0 counts
     suspend_notice
+    check_location || over=1
     counts=$(pcr_value_counts) || exit 1
     printf '%-4s %-7s %s\n' PCR VALUES STATE
     while IFS=$'\t' read -r pcr n; do
@@ -968,7 +989,7 @@ cmd_relock_firmware() {
     ((${#stale[@]} == 0)) ||
         die "no variant of ${stale[*]} matches this boot; update them, then run '$PROG relock-firmware' again (PCRs ${pcrs[*]} stay suspended)"
 
-    check_budget || die "PCRs ${pcrs[*]} stay suspended"
+    { check_location && check_budget; } || die "PCRs ${pcrs[*]} stay suspended"
     log "rebuilding the full policy"
     systemctl restart "$MAKE_POLICY_UNIT" ||
         die "$MAKE_POLICY_UNIT failed; PCRs ${pcrs[*]} stay suspended, see 'systemd-pcrlock log'"

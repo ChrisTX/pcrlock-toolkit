@@ -75,7 +75,20 @@ Options: `--type=TYPE[,TYPE...]`, `--policy=now|mark|none`, `--dry-run`, `-v`.
 After any change the policy is updated by restarting
 `systemd-pcrlock-make-policy.service` (`now`), marking it for pacman's
 restart-marked hook (`mark`), or not at all (`none`). Put make-policy options
-such as `--location=` into a drop-in for that service.
+such as `--location=` into a drop-in for that service:
+
+```ini
+# systemctl edit systemd-pcrlock-make-policy.service
+[Service]
+ExecStart=
+ExecStart=/usr/lib/systemd/systemd-pcrlock make-policy --location=791:940- --strict=yes
+```
+
+`pcrlock` refuses to update the policy unless that `--location=` matches
+`Location=` in `pcrlock.conf` (default `791:940-`). The window starts after
+mor-lock (785) and platsec (790), so the policy never accepts a state from
+before memory encryption and the MOR lock were measured. systemd-pcrlock's
+own default, `760-:940-`, would.
 
 ### Policy size
 

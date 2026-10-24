@@ -71,10 +71,15 @@ add a real `tests/`) before changing generation or prune logic.
 
 ## Measurement layout (PCR 15)
 
-Reference location window: `make-policy --strict=yes --location=791:940-`,
-set in a drop-in for `systemd-pcrlock-make-policy.service`, never in this
-tool. Components before 791 are mandatory; components in the window may or
-may not have happened yet.
+Location window: `make-policy --strict=yes --location=791:940-`, set in a
+drop-in for `systemd-pcrlock-make-policy.service`. `pcrlock` can't pass it
+(it only restarts the unit), but `Location=` in `pcrlock.conf` (default
+`791:940-`) is what the unit must use: `check_location` compares it with the
+unit's `ExecStart=` and `apply_policy`/`relock-firmware` refuse on a mismatch
+(warn with `--policy=none`). A missing `--location=` counts as pcrlock's
+default `760-:940-`, which would accept states before platsec. Components
+before 791 are mandatory; components in the window may or may not have
+happened yet.
 
 | Prio | Component | Measured by | When |
 |---|---|---|---|
