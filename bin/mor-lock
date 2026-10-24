@@ -68,14 +68,19 @@ case "$pcr" in '' | *[!0-9]*) die "invalid PCR: '$pcr'" ;; esac
 [ "$pcr" -le 23 ] || die "invalid PCR: '$pcr'"
 
 # efivarfs files are 4 bytes of attributes (little endian) followed by the data.
-# read_var FILE: prints "ATTR VALUE" as decimals, or nothing if unreadable.
+# read_var FILE: sets var_attr and var_value (decimal) from a variable with one
+# data byte. Fails if the file can't be read or doesn't look like that.
 read_var() {
-    [ -r "$1" ] || return 0
-    # shellcheck disable=SC2046 # word splitting gives one argument per byte
-    set -- $(od -An -tu1 -N5 "$1" 2>/dev/null)
-    [ $# -eq 5 ] || return 0
-    [ "$2" -eq 0 ] && [ "$3" -eq 0 ] && [ "$4" -eq 0 ] || return 0
-    echo "$1 $5"
+    var_attr='' var_value=''
+    bytes=$(od -An -tu1 -N5 "$1" 2>/dev/null) || return 1
+    read -r a0 a1 a2 a3 v rest <<EOF
+$bytes
+EOF
+    [ -n "$v" ] && [ -z "$rest" ] || return 1
+    case "$a0$a1$a2$a3$v" in *[!0-9]*) return 1 ;; esac
+    # Only the low attribute byte is used (NV, BS, RT, ...); the rest must be 0.
+    [ "$a1" -eq 0 ] && [ "$a2" -eq 0 ] && [ "$a3" -eq 0 ] || return 1
+    var_attr=$a0 var_value=$v
 }
 
 # write_var FILE ATTR VALUE: one write() of attributes + one data byte.
@@ -90,27 +95,27 @@ write_var() {
 }
 
 mor_state() {
-    v=$(read_var "$MOR")
     if [ ! -e "$MOR" ]; then echo absent
-    elif [ -z "$v" ]; then echo unknown
-    elif [ $((${v#* } & 1)) -eq 1 ]; then echo on
+    elif ! read_var "$MOR"; then echo unknown
+    elif [ $((var_value & 1)) -eq 1 ]; then echo on
     else echo off
     fi
 }
 
 morlock_state() {
-    v=$(read_var "$MORLOCK")
     if [ ! -e "$MORLOCK" ]; then echo absent; return; fi
-    case "${v#* }" in
+    if ! read_var "$MORLOCK"; then echo unknown; return; fi
+    case "$var_value" in
     0) echo unlocked ;;
     1)
         # Probe: a working lock refuses to clear ClearMemory. If the write goes
         # through, put the old value back and report the lock as unenforced.
         # --status writes nothing, so it can't tell locked from unenforced.
         if [ "$mode" = status ]; then echo locked; return; fi
-        m=$(read_var "$MOR")
-        if [ -n "$m" ] && write_var "$MOR" "${m% *}" $((${m#* } & ~1)); then
-            write_var "$MOR" "${m% *}" "${m#* }" || true
+        if ! read_var "$MOR"; then
+            echo unknown # nothing to probe with
+        elif write_var "$MOR" "$var_attr" $((var_value & ~1)); then
+            write_var "$MOR" "$var_attr" "$var_value" || true
             echo unenforced
         else
             echo locked
@@ -127,12 +132,12 @@ if [ "$mode" = lock ]; then
 
     # Never create the variables: on firmware without MOR support that would
     # only add an ordinary NV variable and report a protection that isn't there.
-    if m=$(read_var "$MOR") && [ -n "$m" ] && [ $((${m#* } & 1)) -eq 0 ]; then
-        write_var "$MOR" "${m% *}" $((${m#* } | 1)) ||
+    if read_var "$MOR" && [ $((var_value & 1)) -eq 0 ]; then
+        write_var "$MOR" "$var_attr" $((var_value | 1)) ||
             echo "${0##*/}: failed to set MOR ClearMemory" >&2
     fi
-    if l=$(read_var "$MORLOCK") && [ -n "$l" ] && [ "${l#* }" -eq 0 ]; then
-        write_var "$MORLOCK" "${l% *}" 1 ||
+    if read_var "$MORLOCK" && [ "$var_value" -eq 0 ]; then
+        write_var "$MORLOCK" "$var_attr" 1 ||
             echo "${0##*/}: failed to set MOR Lock" >&2
     fi
 fi

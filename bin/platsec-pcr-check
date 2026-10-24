@@ -133,9 +133,6 @@ fi
 [ "$cli_checks_set" -eq 1 ] && checks=$cli_checks
 [ -n "$cli_enforce" ] && enforce=$cli_enforce
 
-# Allow commas as separators.
-checks=$(printf '%s' "$checks" | tr ',' ' ')
-
 case "$pcr" in '' | *[!0-9]*) die "invalid PCR: '$pcr'" ;; esac
 [ "$pcr" -le 23 ] || die "invalid PCR: '$pcr'"
 if [ "$mode" = print-pcr ]; then
@@ -144,12 +141,18 @@ if [ "$mode" = print-pcr ]; then
 fi
 case "$enforce" in 0 | 1) ;; *) die "invalid ENFORCE value: '$enforce' (expected 0 or 1)" ;; esac
 
-n=0
-for c in $checks; do
+# The check list is separated by commas and/or any whitespace. Validate it once
+# and normalise it to " name name " in $selected, which is what the checks
+# below are matched against. Globbing is off for the split, so a stray "*"
+# can't expand to file names.
+selected=' '
+set -f
+for c in $(printf '%s' "$checks" | tr ',' ' '); do
     case "$c" in memenc | iommu | preboot_dma) ;; *) die "unknown check: '$c'" ;; esac
-    n=$((n + 1))
+    selected="$selected$c "
 done
-[ "$n" -gt 0 ] || die "no checks selected"
+set +f
+[ "$selected" != ' ' ] || die "no checks selected"
 
 cpuinfo_field() {
     line=$(grep -m1 "^$1[[:space:]]*:" /proc/cpuinfo) || return 0
@@ -259,9 +262,9 @@ add() {
     [ "$2" = on ] || ok=0
 }
 
-# Fixed order, independent of the order in PLATSEC_CHECKS.
+# Fixed order, independent of the order in the check list.
 for c in memenc iommu preboot_dma; do
-    case " $checks " in *" $c "*) ;; *) continue ;; esac
+    case "$selected" in *" $c "*) ;; *) continue ;; esac
     case "$c" in
     memenc)
         case "$vendor" in
@@ -273,6 +276,10 @@ for c in memenc iommu preboot_dma; do
     preboot_dma) add preboot_dma "$(preboot_dma_state)" ;;
     esac
 done
+
+# Backstop for "something is always measured": an empty event would lock in a
+# baseline with no checks at all.
+[ -n "$event" ] || die "internal error: no check produced a result (selected:$selected)"
 
 if [ "$mode" = status ]; then
     echo "$event"

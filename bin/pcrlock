@@ -225,15 +225,16 @@ gen_pe() {
 }
 
 gen_log() {
-    local out=$1 types prog
+    local out=$1 types_json prog
+    local -a types
     [[ -n $c_pcr ]] || die "$c_file: PCR= missing"
     ensure_cel
-    # shellcheck disable=SC2086 # word splitting of the type list is intended
-    types=$(printf '%s\n' $c_event_types | jq -Rsc 'split("\n") | map(select(length > 0))')
+    read -ra types <<<"$c_event_types"
+    types_json=$(jq -nc '$ARGS.positional' --args "${types[@]}")
     # jq program text; $pcr/$types are jq variables, not shell ones.
     # shellcheck disable=SC2016
     prog='[.[] | select(.pcr == $pcr)'
-    if [[ -n $c_event_types ]]; then
+    if ((${#types[@]})); then
         # shellcheck disable=SC2016
         prog+=' | select(.content.event_type as $t | ($types | index($t)) != null)'
     fi
@@ -241,7 +242,7 @@ gen_log() {
         prog+=" | select($c_filter)"
     fi
     prog+='] | {records: map({pcr, digests, content})}'
-    jq --argjson pcr "$c_pcr" --argjson types "$types" "$prog" "$CEL" >"$out" ||
+    jq --argjson pcr "$c_pcr" --argjson types "$types_json" "$prog" "$CEL" >"$out" ||
         die "$c_file: filter failed"
 }
 
@@ -261,10 +262,11 @@ gen_volume_key() {
 
 gen_identity() {
     local out=$1 i=0 mp f files=()
+    local -a mounts
+    read -ra mounts <<<"$c_mounts"
     "$PCRLOCK" lock-machine-id --pcrlock="$tmp/id-machine-id.pcrlock"
     files+=("$tmp/id-machine-id.pcrlock")
-    # shellcheck disable=SC2086 # word splitting of the mount point list is intended
-    for mp in $c_mounts; do
+    for mp in "${mounts[@]}"; do
         i=$((i + 1))
         "$PCRLOCK" lock-file-system "$mp" --pcrlock="$tmp/id-fs-$i.pcrlock"
         files+=("$tmp/id-fs-$i.pcrlock")
