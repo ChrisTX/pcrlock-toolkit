@@ -17,8 +17,15 @@ readonly MAKE_POLICY_UNIT=systemd-pcrlock-make-policy.service
 # make-policy builds one PolicyOR per PCR, and TPM2_PolicyOR takes at most 8
 # branches.
 readonly MAX_PCR_VALUES=8
-# systemd-pcrlock's default for --location=.
+# systemd-pcrlock's defaults for make-policy --location= and --pcr=.
 readonly DEFAULT_LOCATION=760-:940-
+readonly DEFAULT_PCRS=0-5,7,11,13-15
+# suspend-firmware: a runtime drop-in for the make-policy unit (named to sort
+# after users' own drop-ins, which may set ExecStart= too), and the state file
+# that survives the reboot until the firmware PCRs are locked again.
+readonly SUSPEND_DROPIN=/run/systemd/system/$MAKE_POLICY_UNIT.d/zz-pcrlock-toolkit-suspend-firmware.conf
+readonly SUSPEND_STATE=/var/lib/pcrlock-toolkit/firmware-suspended
+readonly RELOCK_UNIT=pcrlock-firmware-relock.service
 readonly EFIVARS=/sys/firmware/efi/efivars
 readonly SHIM_LOCK_GUID=605dab50-e046-4300-abb6-3dd810dd8b23
 # shim's SBAT_VAR_ORIGINAL, the shortest valid SbatLevel.
@@ -30,12 +37,18 @@ config_dir=/etc/pcrlock-toolkit
 opt_dir=/etc/pcrlock.d
 opt_policy=now
 opt_uki_component=650-uki
+opt_suspend_pcrs=0-3
 
 dry_run=0
 verbose=0
 policy_cli=
 type_filter=
 changed=0
+no_apply=0
+# Set by make_policy_argv.
+mp_argv=()
+mp_pcrs=()
+mp_location=
 tmp=
 CEL=
 
@@ -61,6 +74,12 @@ Commands:
   check                    Show how many values each PCR can take in the
                            policy (at most $MAX_PCR_VALUES). Also checked before
                            every policy update.
+  suspend-firmware [PCRS]  Take the firmware PCRs (default: SuspendPCRs= in
+                           pcrlock.conf, else $opt_suspend_pcrs) out of the
+                           policy until the next boot, for a firmware update.
+  relock-firmware          Lock them again: regenerate their components from
+                           the event log and rebuild the full policy. Run by
+                           $RELOCK_UNIT on the next boot.
 
 Options:
   --type=TYPE[,TYPE...]    generate: only components of these types.
@@ -134,6 +153,7 @@ global_kv() {
     Directory) opt_dir=$2 ;;
     Policy) opt_policy=$2 ;;
     UkiComponent) opt_uki_component=$2 ;;
+    SuspendPCRs) opt_suspend_pcrs=$2 ;;
     *) die "$3: unknown key '$1'" ;;
     esac
 }
@@ -573,26 +593,53 @@ run_component() {
 # ones are ignored. Each stop adds the product of the variant counts so far
 # (counting variants that differ on that PCR), unless the component doesn't
 # touch the PCR. That's an upper bound; coinciding values aren't detected.
-pcr_value_counts() {
-    local loc=$DEFAULT_LOCATION start end id path w mask_json='[]' args
-    local -a argv=() mask=() items
+# pcr_list LIST...: expands PCR lists ("0-5,7", "0+7", "0 1 11") into one
+# number per line, sorted and unique.
+pcr_list() {
+    local w items
+    for w in "$@"; do
+        IFS=', +' read -ra items <<<"$w"
+        printf '%s\n' "${items[@]}"
+    done | jq -Rn '[inputs | select(length > 0)
+        | if test("^[0-9]+-[0-9]+$") then (split("-") | map(tonumber) | range(.[0]; .[1] + 1))
+          elif test("^[0-9]+$") then tonumber
+          else error("invalid PCR \(.)") end] | unique | .[]' || die "invalid PCR list: $*"
+}
+
+# read_pcrs VAR LIST...: sets array VAR to the expanded PCR lists. Not via
+# process substitution, so an invalid list stops the caller.
+read_pcrs() {
+    local out
+    out=$(pcr_list "${@:2}") || exit 1
+    [[ -n $out ]] || die "empty PCR list"
+    mapfile -t "$1" <<<"$out"
+}
+
+# make_policy_argv: sets mp_argv to the make-policy unit's ExecStart= command
+# line, mp_location to its --location= and mp_pcrs to the PCRs it covers.
+make_policy_argv() {
+    local args w
+    local -a pcrs=()
     args=$(systemctl show -P ExecStart "$MAKE_POLICY_UNIT" 2>/dev/null |
         sed -n 's/.*argv\[\]=\([^;]*\) ;.*/\1/p' | tail -n 1) || true
-    read -ra argv <<<"$args"
-    for w in "${argv[@]}"; do
+    read -ra mp_argv <<<"$args"
+    mp_location=$DEFAULT_LOCATION
+    for w in "${mp_argv[@]}"; do
         case $w in
-        --location=*) loc=${w#*=} ;;
-        --pcr=*) IFS=,+ read -ra items <<<"${w#*=}"; mask+=("${items[@]}") ;;
+        --location=*) mp_location=${w#*=} ;;
+        --pcr=*) pcrs+=("${w#*=}") ;;
         esac
     done
-    start=${loc%%:*}
-    end=${loc#*:}
-    if ((${#mask[@]})); then
-        mask_json=$(jq -nc '[$ARGS.positional[]
-            | if test("^[0-9]+-[0-9]+$") then (split("-") | map(tonumber) | range(.[0]; .[1] + 1))
-              else tonumber end]' --args "${mask[@]}") || die "can't parse --pcr= of $MAKE_POLICY_UNIT"
-    fi
-    debug "counting PCR values for --location=$start:$end, PCRs ${mask[*]:-all}"
+    read_pcrs mp_pcrs "${pcrs[@]:-$DEFAULT_PCRS}"
+}
+
+pcr_value_counts() {
+    local start end id path mask_json
+    make_policy_argv
+    start=${mp_location%%:*}
+    end=${mp_location#*:}
+    mask_json=$(printf '%s\n' "${mp_pcrs[@]}" | jq -sc .)
+    debug "counting PCR values for --location=$start:$end, PCRs ${mp_pcrs[*]}"
 
     "$PCRLOCK" list-components --json=short >"$tmp/components.json" ||
         die "systemd-pcrlock list-components failed"
@@ -609,7 +656,7 @@ pcr_value_counts() {
         group_by(.id) as $comps
         | [$comps[][].recs[].pcr] | unique | .[]
         | . as $p
-        | select(($mask | length) == 0 or any($mask[]; . == $p))
+        | select(any($mask[]; . == $p))
         | [$comps[] | {id: .[0].id,
                        n: ([.[] | [.recs[] | select(.pcr == $p) | .d]] | unique | length),
                        touches: any(.[].recs[]; .pcr == $p)}] as $c
@@ -638,6 +685,7 @@ check_budget() {
 
 apply_policy() {
     local mode=${policy_cli:-$opt_policy}
+    ((!no_apply)) || return 0
     if [[ -e $tmp/changed ]]; then changed=1; fi
     if ((!changed)); then
         debug "nothing changed, policy left alone"
@@ -720,6 +768,7 @@ cmd_generate() {
 
 cmd_list() {
     local f target state
+    suspend_notice
     printf '%-5s %-24s %-11s %-9s %s\n' PRIO NAME TYPE STATE OUTPUT
     while IFS= read -r f; do
         load_component "$f"
@@ -775,6 +824,7 @@ cmd_prune() {
 
 cmd_check() {
     local pcr n state over=0 counts
+    suspend_notice
     counts=$(pcr_value_counts) || exit 1
     printf '%-4s %-7s %s\n' PCR VALUES STATE
     while IFS=$'\t' read -r pcr n; do
@@ -787,6 +837,143 @@ cmd_check() {
         printf '%-4s %-7s %s\n' "$pcr" "$n" "$state"
     done <<<"$counts"
     ((!over))
+}
+
+# suspend_notice: warns while the firmware PCRs are out of the policy.
+suspend_notice() {
+    if [[ -e $SUSPEND_STATE ]]; then
+        warn "firmware PCRs are suspended ($(tr '\n' ' ' <"$SUSPEND_STATE")); run '$PROG relock-firmware'"
+    fi
+}
+
+cmd_suspend_firmware() {
+    local p w
+    local -a want suspend=() keep=() argv=()
+    ((!dry_run)) || die "suspend-firmware doesn't support --dry-run"
+    systemctl is-enabled --quiet "$RELOCK_UNIT" ||
+        die "$RELOCK_UNIT is not enabled, so the firmware PCRs would stay out of the policy after the update; run 'systemctl enable $RELOCK_UNIT' first"
+    read_pcrs want "${@:-$opt_suspend_pcrs}"
+    if [[ -e $SUSPEND_DROPIN ]]; then
+        # Start from the real command line again.
+        rm -f -- "$SUSPEND_DROPIN"
+        systemctl daemon-reload
+    fi
+    make_policy_argv
+    ((${#mp_argv[@]})) || die "can't read ExecStart= of $MAKE_POLICY_UNIT"
+    for p in "${mp_pcrs[@]}"; do
+        if [[ " ${want[*]} " == *" $p "* ]]; then suspend+=("$p"); else keep+=("$p"); fi
+    done
+    ((${#suspend[@]})) || die "none of PCRs ${want[*]} is in the policy (PCRs ${mp_pcrs[*]})"
+    for w in "${mp_argv[@]}"; do
+        [[ $w == --pcr=* ]] || argv+=("${w//%/%%}")
+    done
+    for p in "${keep[@]}"; do argv+=("--pcr=$p"); done
+
+    mkdir -p -- "${SUSPEND_DROPIN%/*}" "${SUSPEND_STATE%/*}"
+    printf '%s\n' "# Written by '$PROG suspend-firmware'. Gone after a reboot;" \
+        "# '$PROG relock-firmware' removes it right away." \
+        '[Service]' 'ExecStart=' "ExecStart=${argv[*]}" >"$SUSPEND_DROPIN"
+    (IFS=,; printf 'PCRs=%s\nSince=%s\n' "${suspend[*]}" "$(date -Iseconds)") >"$SUSPEND_STATE"
+    systemctl daemon-reload
+    log "rebuilding the policy without PCRs ${suspend[*]}"
+    if ! systemctl restart "$MAKE_POLICY_UNIT"; then
+        rm -f -- "$SUSPEND_DROPIN" "$SUSPEND_STATE"
+        systemctl daemon-reload
+        die "$MAKE_POLICY_UNIT failed; nothing was suspended"
+    fi
+    log "PCRs ${suspend[*]} are out of the policy until they are locked again. Stage the firmware update now; $RELOCK_UNIT locks them again on the next boot."
+}
+
+suspend_kv() {
+    case $1 in
+    PCRs) suspended_pcrs=$2 ;;
+    Since) ;;
+    *) die "$3: unknown key '$1'" ;;
+    esac
+}
+
+cmd_relock_firmware() {
+    local id path p f suspended_pcrs=$opt_suspend_pcrs code=0 config=0
+    local -a pcrs names=() stale=()
+    local -A varlib=() touches=() booted=()
+    ((!dry_run)) || die "relock-firmware doesn't support --dry-run"
+    if [[ -e $SUSPEND_DROPIN ]]; then
+        rm -f -- "$SUSPEND_DROPIN"
+        systemctl daemon-reload
+        log "removed the runtime override of $MAKE_POLICY_UNIT"
+    elif [[ ! -e $SUSPEND_STATE ]]; then
+        log "firmware PCRs aren't suspended, nothing to do"
+        return 0
+    fi
+    if [[ -e $SUSPEND_STATE ]]; then
+        parse_kv_file "$SUSPEND_STATE" suspend_kv
+    fi
+    read_pcrs pcrs "$suspended_pcrs"
+    log "locking PCRs ${pcrs[*]} again from the current event log"
+
+    # systemd's own firmware components, if they are in use: lock-firmware-code
+    # covers PCRs 0 and 2, lock-firmware-config PCRs 1 and 3.
+    "$PCRLOCK" list-components --json=short >"$tmp/components.json" ||
+        die "systemd-pcrlock list-components failed"
+    while IFS=$'\t' read -r id path; do
+        [[ $path == /var/lib/pcrlock.d/* ]] && varlib[$id]=1
+    done < <(jq -r '.[] | .id as $id | (.variants | if type == "array" then .[] else . end) | [$id, .] | @tsv' "$tmp/components.json")
+    for id in "${!varlib[@]}"; do
+        case $id in
+        *-firmware-code*) code=1 ;;
+        *-firmware-config*) config=1 ;;
+        esac
+    done
+    for p in "${pcrs[@]}"; do
+        case $p in
+        0 | 2) ((code)) && code=2 ;;
+        1 | 3) ((config)) && config=2 ;;
+        esac
+    done
+    if ((code == 2)); then
+        log "running systemd-pcrlock lock-firmware-code"
+        "$PCRLOCK" lock-firmware-code
+    fi
+    if ((config == 2)); then
+        log "running systemd-pcrlock lock-firmware-config"
+        "$PCRLOCK" lock-firmware-config
+    fi
+
+    # The toolkit's own log components on these PCRs.
+    while IFS= read -r f; do
+        load_component "$f"
+        if [[ $c_type == log ]] && is_yes "$c_enabled" && [[ " ${pcrs[*]} " == *" $c_pcr "* ]]; then
+            names+=("$c_name")
+        fi
+    done < <(component_files)
+    if ((${#names[@]})); then
+        no_apply=1
+        cmd_generate "${names[@]}"
+        no_apply=0
+    fi
+
+    # Anything else on these PCRs (e.g. hand-made variants) must still match.
+    "$PCRLOCK" list-components --json=short >"$tmp/components.json" ||
+        die "systemd-pcrlock list-components failed"
+    while IFS=$'\t' read -r id path; do
+        if jq -e --argjson p "$(printf '%s\n' "${pcrs[@]}" | jq -sc .)" \
+            'any(.records[]?; .pcr as $r | $p | index($r) != null)' "$path" >/dev/null 2>&1; then
+            touches[$id]=1
+            if is_booted "$path"; then booted[$id]=1; fi
+        fi
+    done < <(jq -r '.[] | .id as $id | (.variants | if type == "array" then .[] else . end) | [$id, .] | @tsv' "$tmp/components.json")
+    for id in "${!touches[@]}"; do
+        [[ -n ${booted[$id]:-} ]] || stale+=("$id")
+    done
+    ((${#stale[@]} == 0)) ||
+        die "no variant of ${stale[*]} matches this boot; update them, then run '$PROG relock-firmware' again (PCRs ${pcrs[*]} stay suspended)"
+
+    check_budget || die "PCRs ${pcrs[*]} stay suspended"
+    log "rebuilding the full policy"
+    systemctl restart "$MAKE_POLICY_UNIT" ||
+        die "$MAKE_POLICY_UNIT failed; PCRs ${pcrs[*]} stay suspended, see 'systemd-pcrlock log'"
+    rm -f -- "$SUSPEND_STATE"
+    log "PCRs ${pcrs[*]} are locked again"
 }
 
 # valid_kver KVER: a kernel version usable as a variant file name. "-previous"
@@ -878,6 +1065,8 @@ main() {
     prune) ((${#args[@]} == 0)) || die "prune takes no arguments"; cmd_prune ;;
     uki) cmd_uki "${args[@]}" ;;
     check) ((${#args[@]} == 0)) || die "check takes no arguments"; cmd_check ;;
+    suspend-firmware) cmd_suspend_firmware "${args[@]}" ;;
+    relock-firmware) ((${#args[@]} == 0)) || die "relock-firmware takes no arguments"; cmd_relock_firmware ;;
     help) usage ;;
     *) die "unknown command: $cmd (see --help)" ;;
     esac

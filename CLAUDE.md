@@ -9,7 +9,7 @@ without a reason.
 ## Layout and commands
 
 - `bin/pcrlock`: bash CLI (`generate`, `list`, `prune`, `uki add|remove`,
-  `check`).
+  `check`, `suspend-firmware`, `relock-firmware`).
   Reads `/etc/pcrlock-toolkit/pcrlock.conf` and `components.d/*.conf`, writes
   to `/etc/pcrlock.d`.
 - `bin/platsec-pcr-check`: POSIX sh, runs in the initrd. Checks memory
@@ -19,7 +19,7 @@ without a reason.
   without a key and measures the resulting state.
 - `units/`: `platsec-pcr-check.service`, `mor-lock.service`,
   `initrd-pcr15-seal.service`, `pcrlock-prune.service`,
-  `pcrlock-secureboot-policy.{path,service}`.
+  `pcrlock-secureboot-policy.{path,service}`, `pcrlock-firmware-relock.service`.
 - `dracut/91platsec`, `dracut/91morlock`, `dracut/91pcr15seal`: initrd
   modules, opt-in via `add_dracutmodules`.
 - `kernel-install/99-pcrlock.install`: thin wrapper around `pcrlock uki`.
@@ -206,6 +206,30 @@ via `printf -v`/`read -d ''`, since `$(...)` would strip SbatLevel's trailing
 newline; `tail | head` dies of SIGPIPE under `pipefail`, hence `dd`. The
 pacman hook runs `--type=pe,secureboot-authority` (`--type=` takes a list).
 
+**Firmware updates: suspend, don't predict.** What new firmware measures into
+PCR 0 (CRTM version, firmware volume blobs as mapped, AGESA/PSP events) can't
+be derived from a capsule, and trusting the capsule's own claims would
+defeat the point. `suspend-firmware` does what BitLocker and fwupd's plugin
+do: one boot without the firmware PCRs. Details that matter:
+
+- The reduced mask goes into a **runtime** drop-in
+  (`/run/systemd/system/systemd-pcrlock-make-policy.service.d/zz-…`), so a
+  reboot restores the real `ExecStart=`. The `zz-` prefix sorts it after the
+  user's own drop-ins (drop-ins sort by file name across directories, and
+  `override.conf` would otherwise reset `ExecStart=` again). `ExecStart=` is
+  rebuilt from `systemctl show`'s `argv[]` with repeated `--pcr=N`.
+- The persistent state file `/var/lib/pcrlock-toolkit/firmware-suspended` is
+  what makes the relock unit run, and it's removed only after the full
+  make-policy succeeded. Otherwise the NV index would keep the reduced policy
+  indefinitely, since the boot-time make-policy run fails with stale
+  firmware components.
+- The relock unit is ordered **after** make-policy (restarting it from there
+  is safe, unlike `pcrlock-prune.service`). `suspend-firmware` refuses unless
+  the relock unit is enabled, and rolls back if make-policy fails.
+- PCR lists are parsed with `read_pcrs`, never via `< <(...)`: a failing parse
+  inside process substitution doesn't stop the caller, which once let a
+  relock "succeed" with no PCRs and delete the state file.
+
 **No option ROM variants.** Option ROMs verified before the separator (e.g.
 KVMs a server provider attaches) add authority records that could be
 anything. Accepting unknown ones would defeat the point of PCR 7, so a new
@@ -390,6 +414,9 @@ the logged content against the digest. ✗ is expected for volume-key records
   `systemd-pcrlock` (only stubs fed with aurora's real PCR 7 log). In
   particular: that `lock-secureboot-policy` records come in log order, and
   that the budget formula matches how make-policy counts the location window.
+- `suspend-firmware`/`relock-firmware` through a real capsule update (only
+  stubs so far): whether the firmware boots the OS once while applying the
+  capsule, and that make-policy accepts the drop-in's `--pcr=` list.
 - `pcrlock-secureboot-policy.path` firing on an efivarfs write (fwupd's dbx
   update on the RAID server is the planned test).
 

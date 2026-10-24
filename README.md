@@ -35,6 +35,7 @@ for a TPM2-unlocked system:
 | `/usr/share/libalpm/hooks/25-pcrlock-pe.hook` | re-locks boot loaders on package updates |
 | `pcrlock-prune.service` | runs `pcrlock prune` early at boot, before make-policy (opt-in) |
 | `pcrlock-secureboot-policy.path` | regenerates the Secure Boot policy component when dbx changes (opt-in) |
+| `pcrlock-firmware-relock.service` | locks the firmware PCRs again on the boot after `pcrlock suspend-firmware` (opt-in) |
 | `/usr/lib/dracut/modules.d/91platsec`, `91morlock`, `91pcr15seal` | initrd modules (opt-in) |
 | `/usr/lib/pcrlock-toolkit/mkosi-initrd/` | `initrd.target.wants` trees for the mkosi-initrd drop-ins |
 | `/usr/share/pcrlock-toolkit/examples/` | example components, dracut and mkosi-initrd configs, pacman hooks, DKMS signing config |
@@ -66,6 +67,8 @@ pcrlock prune                  drop -previous variants and UKIs of removed kerne
 pcrlock uki add KVER UKI [KERNEL]
 pcrlock uki remove KVER
 pcrlock check                  show how many values each PCR can take (max 8)
+pcrlock suspend-firmware [PCRS]
+pcrlock relock-firmware
 ```
 
 Options: `--type=TYPE[,TYPE...]`, `--policy=now|mark|none`, `--dry-run`, `-v`.
@@ -203,3 +206,40 @@ the keys cleared in the firmware setup first. If the enrolled variables match
 the old ones byte for byte, PCR 7 comes out the same. A `dbx.auth` there is a
 snapshot, though, so keep it in sync with every dbx update, or a re-enrollment
 rolls dbx back and changes PCR 7.
+
+### Firmware updates
+
+A firmware update (including UEFI Capsule on Disk) changes PCR 0 and usually
+PCR 1, and what the new firmware measures can't be worked out from the
+capsule. Instead, `pcrlock suspend-firmware` takes the firmware PCRs out of
+the policy for one boot, like suspending BitLocker:
+
+```text
+systemctl enable pcrlock-firmware-relock.service    # once
+pcrlock suspend-firmware                            # then stage the update
+```
+
+It rebuilds the policy with a runtime drop-in for
+`systemd-pcrlock-make-policy.service` that drops those PCRs from `--pcr=`
+(default 0-3, `SuspendPCRs=` in `pcrlock.conf`, or as an argument, e.g.
+`pcrlock suspend-firmware 0-3,7` if the update resets the Secure Boot keys).
+The drop-in lives in `/run`, so it's gone after the reboot. On the next boot
+`pcrlock-firmware-relock.service` runs `pcrlock relock-firmware`:
+
+- regenerates systemd's own firmware components (`lock-firmware-code`,
+  `lock-firmware-config`) if they are in use, and the toolkit's `Type=log`
+  components on those PCRs, from the new event log
+- refuses if any other component on those PCRs (e.g. hand-made variants)
+  has no variant matching this boot
+- rebuilds the full policy
+
+Until that succeeds, the PCRs stay out of the policy, the unit fails and
+`pcrlock list`/`check` warn. Fix the components and run
+`pcrlock relock-firmware` again. Running it on the same boot cancels a
+suspension.
+
+While suspended, firmware changes go unnoticed: the update itself is still
+signature-checked by the firmware, but nothing else is. Keep the window
+short. systemd-pcrlock-make-policy.service runs once at boot before the
+relock and fails under `--strict=yes` with the stale firmware components;
+that's expected.
