@@ -37,9 +37,9 @@ without a reason.
   would conflict with a user's existing file of the same name.
 
 ```text
-make check                      # bash -n / sh -n, then shellcheck — must pass, makepkg runs it
-make install DESTDIR=/tmp/x     # staged install to inspect the layout
-makepkg -si                     # PKGBUILD builds from the working tree ($startdir)
+make check                   # bash -n, sh -n, shellcheck; must pass (makepkg)
+make install DESTDIR=/tmp/x  # staged install to inspect the layout
+makepkg -si                  # PKGBUILD builds from the working tree
 ```
 
 There is no automated test suite yet. During development `bin/pcrlock` was run
@@ -69,10 +69,10 @@ add a real `tests/`) before changing generation or prune logic.
 
 ## Measurement layout (PCR 15)
 
-Reference location window: `make-policy --strict=yes --location=791:940-`, set in a drop-in
-for `systemd-pcrlock-make-policy.service`, never in this tool. Components
-before 791 are mandatory; components in the window may or may not have
-happened yet.
+Reference location window: `make-policy --strict=yes --location=791:940-`,
+set in a drop-in for `systemd-pcrlock-make-policy.service`, never in this
+tool. Components before 791 are mandatory; components in the window may or
+may not have happened yet.
 
 | Prio | Component | Measured by | When |
 |---|---|---|---|
@@ -83,9 +83,9 @@ happened yet.
 | 820 | system-identity | pcrmachine + pcrfs, merged | after switch-root |
 | 841+ | cryptsetup-<vol> | systemd-cryptsetup | after switch-root, serialized |
 
-- Root unlocks against the state with only 785+790. Later disks unlock against
-  785+790+795+799+820(+previous disks), so their unlocks must be **serialized** and
-  the component numbers must follow the unlock order.
+- Root unlocks against the state with only 785+790. Later disks unlock
+  against 785+790+795+799+820(+previous disks), so their unlocks must be
+  **serialized** and the component numbers must follow the unlock order.
 - 785 and 790 sit before the window on purpose: no MOR lock or memory
   encryption off means no unlock at all, and they add no PCR 15 branches.
   `mor-lock.service` is ordered `Before=platsec-pcr-check.service`, so the two
@@ -190,18 +190,18 @@ policy the component was generated from, and `rd.hostonly=0` must not strip
 it. `check()` returns 255 (only when requested). Don't use `readonly` at
 module scope, because dracut may source module-setup.sh twice.
 
-**mkosi-initrd drop-ins** (`examples/mkosi-initrd/`; verified by a test
-build with mkosi 27.1, not yet booted). mkosi-initrd builds from repository packages, so a locally built
-toolkit package can't simply be added to `Packages=`; host files come in with
-`ExtraTrees=` instead (single files work, as mkosi-initrd's own crypttab
-handling shows). Its preset is `disable *` and `preset-all` runs after the
-extra trees are copied, so units are enabled by `initrd.target.wants`
-symlinks under `/usr/lib` (in `/usr/lib/pcrlock-toolkit/mkosi-initrd/<name>`),
-which presets don't remove. `systemd-pcrextend.socket` is statically enabled
-by the systemd package. The drop-ins are examples for `/etc/mkosi-initrd`,
-never installed to `/usr/lib/mkosi-initrd`, which would apply them to every
-build. Every `ExtraTrees=` source must exist, so host unit drop-ins are
-commented out.
+**mkosi-initrd drop-ins** (`examples/mkosi-initrd/`; verified by a test build
+with mkosi 27.1, not yet booted). mkosi-initrd builds from repository
+packages, so a locally built toolkit package can't simply be added to
+`Packages=`; host files come in with `ExtraTrees=` instead (single files work,
+as mkosi-initrd's own crypttab handling shows). Its preset is `disable *` and
+`preset-all` runs after the extra trees are copied, so units are enabled by
+`initrd.target.wants` symlinks under `/usr/lib` (in
+`/usr/lib/pcrlock-toolkit/mkosi-initrd/<name>`), which presets don't remove.
+`systemd-pcrextend.socket` is statically enabled by the systemd package. The
+drop-ins are examples for `/etc/mkosi-initrd`, never installed to
+`/usr/lib/mkosi-initrd`, which would apply them to every build. Every
+`ExtraTrees=` source must exist, so host unit drop-ins are commented out.
 
 Checking an image: `systemctl --root=<dir> is-enabled` reports these units
 (and systemd's own `systemd-pcrextend.socket`) as `disabled`, because it
@@ -236,7 +236,9 @@ key), as Windows does with BitLocker. Locking with ClearMemory at 0 would
 protect nothing; the kernel's `CONFIG_RESET_ATTACK_MITIGATION` (off on the
 reference kernel) would set it in the EFI stub, but userspace would then have
 to clear it on clean shutdown, which the lock forbids. The cost is a firmware
-memory wipe on every reboot. Details that matter:
+memory wipe on every reboot. That made no noticeable difference on the
+reference machine, but it can slow reboots down a lot on other firmware.
+Details that matter:
 
 - efivarfs data is 4 bytes of attributes plus the value, written in one
   `write()`, and the kernel marks these variables immutable, so each write is
@@ -295,7 +297,8 @@ one full boot with the generated policy:
 - platsec in a real initrd on the AMD path (TSME, IVRS):
   `tsme=on;iommu=on;preboot_dma=on`.
 - mor-lock on real firmware: efivarfs accepts the writes and the probe write
-  is refused once locked (`mor=on;morlock=locked`).
+  is refused once locked (`mor=on;morlock=locked`). The memory wipe added no
+  noticeable reboot time there; other firmware can be much slower.
 - The seal's Varlink measurement matches the `lock-raw` component (799).
 - `lock-file-system` with one call per mount point (`/` and `/var` both match
   820).
@@ -311,7 +314,6 @@ the logged content against the digest. ✗ is expected for volume-key records
 
 - The Intel paths of platsec: TME via MSR 0x982 and the DMAR flags offset
   (only exercised against fake sysfs).
-- How long the MOR memory wipe adds to a reboot.
 - A booted mkosi-initrd image (only test-built).
 
 ## Open items

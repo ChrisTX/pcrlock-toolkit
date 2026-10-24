@@ -79,7 +79,8 @@ Rebuilding the UKI also re-locks it through `99-pcrlock.install`.
   bridges, closing a DMA window before the IOMMU is up.
 - `hardened_usercopy=1`, `slab_nomerge`, `page_alloc.shuffle=1`,
   `randomize_kstack_offset=1`: harder heap and stack exploitation.
-- `init_on_alloc=1`: zero memory on allocation. Usually less than 1% performance impact.
+- `init_on_alloc=1`: zero memory on allocation. Usually less than 1%
+  performance impact.
 - `hash_pointers=always`: always hash `%p` pointers in kernel messages.
 - `proc_mem.force_override=never`: `/proc/<pid>/mem` can't write through
   page protections.

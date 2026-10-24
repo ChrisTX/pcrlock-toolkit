@@ -90,8 +90,8 @@ The variant that matched the running system before an update is kept as
 `-previous`. Likewise, `pcrlock uki remove` (run by kernel-install when a
 kernel is removed, which on Arch happens on every kernel upgrade) keeps the
 variant of the running kernel. `pcrlock-prune.service` removes both on the
-next boot once they no longer match, before `systemd-pcrlock-make-policy.service` rebuilds the
-policy:
+next boot once they no longer match, before
+`systemd-pcrlock-make-policy.service` rebuilds the policy:
 
 ```text
 systemctl enable systemd-pcrlock-make-policy.service pcrlock-prune.service
