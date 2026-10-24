@@ -141,17 +141,19 @@ if [ "$mode" = print-pcr ]; then
 fi
 case "$enforce" in 0 | 1) ;; *) die "invalid ENFORCE value: '$enforce' (expected 0 or 1)" ;; esac
 
-# The check list is separated by commas and/or any whitespace. Validate it once
-# and normalise it to " name name " in $selected, which is what the checks
-# below are matched against. Globbing is off for the split, so a stray "*"
-# can't expand to file names.
+# The check list is separated by commas and/or any whitespace. Turn every
+# separator into a newline and read one name per line, then validate it and
+# normalise the list to " name name " in $selected, which is what the checks
+# below are matched against. The here-document keeps the loop in this shell
+# (a pipe into while would run it in a subshell, losing $selected and die).
 selected=' '
-set -f
-for c in $(printf '%s' "$checks" | tr ',' ' '); do
+while IFS= read -r c; do
+    [ -n "$c" ] || continue
     case "$c" in memenc | iommu | preboot_dma) ;; *) die "unknown check: '$c'" ;; esac
     selected="$selected$c "
-done
-set +f
+done <<EOF
+$(printf '%s\n' "$checks" | tr ', \t' '[\n*]')
+EOF
 [ "$selected" != ' ' ] || die "no checks selected"
 
 cpuinfo_field() {
