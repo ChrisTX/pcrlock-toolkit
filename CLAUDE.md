@@ -24,6 +24,8 @@ without a reason.
 - `examples/hardening/`: general hardening examples (cmdline, sysctl, …),
   unrelated to pcrlock and not installed. Keep them out of
   `examples/dracut.conf.d/`, whose `*.conf` users are told to copy wholesale.
+  `examples/hardening/README.md` documents every setting; update it in the
+  same commit when an example changes.
 - `libexec/sign-file-tpm2` + `conf/openssl-tpm2.cnf`: DKMS signing with a
   TPM2 key. Unrelated to pcrlock; may move to its own package.
   `conf/mok-signing.conf` installs to `/etc/dkms/framework.conf.d/` (a

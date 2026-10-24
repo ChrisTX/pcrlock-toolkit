@@ -33,8 +33,9 @@ for a TPM2-unlocked system:
 
 `examples/hardening/` in the source tree holds unrelated system hardening
 examples (kernel command line, sysctl, modprobe, sysusers, systemd and dracut
-drop-ins). They are not installed by the package; each file names its target
-path in its first line.
+drop-ins). They are not installed by the package; see
+[`examples/hardening/README.md`](examples/hardening/README.md) for where each
+file goes and what every setting does.
 
 ## `pcrlock`
 

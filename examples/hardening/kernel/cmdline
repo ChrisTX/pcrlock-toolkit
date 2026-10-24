@@ -12,9 +12,7 @@ apparmor=1
 lockdown=integrity
 module.sig_enforce=1
 
-# Force IOMMU for both AMD and Intel CPUs
-iommu=panic
-iommu=force
+# Force strict IOMMU for both AMD and Intel CPUs
 iommu.passthrough=0
 iommu.strict=1
 amd_iommu=force_isolation,pgtbl_v2
@@ -28,12 +26,17 @@ efi=disable_early_pci_dma
 hardened_usercopy=1
 hash_pointers=always
 init_on_alloc=1
-init_on_free=1
 page_alloc.shuffle=1
 proc_mem.force_override=never
 randomize_kstack_offset=1
 slab_nomerge
 vsyscall=none
+
+# Additionally, but with a 2-5% performance hit
+# init_on_free=1
+
+# SLUB red zoning, severe performance hit
+# slub_debug=ZF
 
 # Sysctls applied before PID 1 starts (signed + measured as part of the UKI).
 # Only settings systemd's own sysctl.d files don't touch - anything they do
@@ -63,9 +66,6 @@ panic=10
 # Audit limits
 audit=1
 audit_backlog_limit=8192
-
-# Nvidia settings
-NVreg_UseKernelSuspendNotifiers=1
 
 # Disable emergency.target and shell to prevent access to the UKI
 rd.shell=0
