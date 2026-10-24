@@ -87,8 +87,10 @@ it is installed as shim's second stage (`\EFI\BOOT\grubx64.efi`), so that
 copy needs its own hook.
 
 The variant that matched the running system before an update is kept as
-`-previous`. `pcrlock-prune.service` removes it on the next boot once it no
-longer matches, before `systemd-pcrlock-make-policy.service` rebuilds the
+`-previous`. Likewise, `pcrlock uki remove` (run by kernel-install when a
+kernel is removed, which on Arch happens on every kernel upgrade) keeps the
+variant of the running kernel. `pcrlock-prune.service` removes both on the
+next boot once they no longer match, before `systemd-pcrlock-make-policy.service` rebuilds the
 policy:
 
 ```text

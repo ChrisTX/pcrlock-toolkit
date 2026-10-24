@@ -1,6 +1,7 @@
 #!/bin/sh
 # kernel-install plugin: lock each UKI built by kernel-install as a variant of
-# the UKI pcrlock component, and drop it again when the kernel is removed.
+# the UKI pcrlock component, and drop it again when the kernel is removed
+# (except for the running kernel, which `pcrlock prune` drops after reboot).
 # Variants are named after the kernel version alone (no entry token), since
 # one machine owns /etc/pcrlock.d; `pcrlock prune` relies on that name.
 # The work is done by `pcrlock uki add|remove`; see pcrlock --help.

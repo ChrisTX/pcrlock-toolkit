@@ -47,7 +47,8 @@ Commands:
                            Lock a UKI (and the kernel image it loads) as
                            variant KVER (the kernel version) of the UKI
                            component. Used by the kernel-install plugin.
-  uki remove KVER          Remove the UKI variant KVER.
+  uki remove KVER          Remove the UKI variant KVER, unless it is the
+                           running one (prune removes that after reboot).
 
 Options:
   --type=TYPE              generate: only components of this type.
@@ -531,10 +532,15 @@ cmd_uki() {
         (($# == 1)) || die "usage: $PROG uki remove KVER"
         valid_kver "$1"
         target=$opt_dir/$opt_uki_component.pcrlock.d/$1.pcrlock
-        if [[ -e $target ]]; then
-            remove_file "$target" "kernel $1 removed"
-        else
+        if [[ ! -e $target ]]; then
             debug "${target#"$opt_dir"/} not present, nothing to do"
+        elif is_booted "$target"; then
+            # kernel-install removes the old kernel when a new one is installed,
+            # usually the running one. Dropping its variant would leave the
+            # running system outside the policy; prune removes it after reboot.
+            log "kept ${target#"$opt_dir"/}: kernel $1 is the current boot; '$PROG prune' removes it after the next boot"
+        else
+            remove_file "$target" "kernel $1 removed"
         fi
         ;;
     *) die "usage: $PROG uki add|remove ..." ;;

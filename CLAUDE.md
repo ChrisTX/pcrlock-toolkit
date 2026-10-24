@@ -111,7 +111,10 @@ is kept as `<name>-previous.pcrlock` **only if it matches the current boot**
 (`is_booted`: PCR 4 digests if the variant has any, else every record must be
 in the event log). `prune` deletes previous variants that don't match the
 current boot, and UKI variants whose `/usr/lib/modules/<kver>` is gone, but
-never the variant that is running.
+never the variant that is running. `uki remove` follows the same rule and
+keeps a variant that `is_booted`: kernel-install runs `remove` for the old
+kernel during an upgrade, which is usually the running one, and dropping it
+would push the running system out of the policy for the rest of the boot.
 
 **Loaders stay separate components.** shim (625) and systemd-boot (630) are
 not merged. Independent variants accept every old/new combination. That
