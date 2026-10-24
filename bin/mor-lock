@@ -76,7 +76,7 @@ read_var() {
     read -r a0 a1 a2 a3 v rest <<EOF
 $bytes
 EOF
-    [ -n "$v" ] && [ -z "$rest" ] || return 1
+    [ "$v" != "" ] && [ "$rest" = "" ] || return 1
     case "$a0$a1$a2$a3$v" in *[!0-9]*) return 1 ;; esac
     # Only the low attribute byte is used (NV, BS, RT, ...); the rest must be 0.
     [ "$a1" -eq 0 ] && [ "$a2" -eq 0 ] && [ "$a3" -eq 0 ] || return 1

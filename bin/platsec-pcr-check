@@ -97,7 +97,7 @@ done
 if [ -e "$config" ]; then
     [ -r "$config" ] || die "cannot read config file: $config"
     n=0
-    while IFS= read -r line || [ -n "$line" ]; do
+    while IFS= read -r line || [ "$line" != "" ]; do
         n=$((n + 1))
         # Trim leading/trailing whitespace.
         line=${line#"${line%%[![:space:]]*}"}
@@ -119,19 +119,19 @@ if [ -e "$config" ]; then
         *) die "$config:$n: unknown key '$key'" ;;
         esac
     done <"$config"
-elif [ -n "$config_explicit" ]; then
+elif [ "$config_explicit" != "" ]; then
     die "config file not found: $config"
 fi
 
 # Environment overrides the config file.
-[ -n "${PLATSEC_PCR+x}" ] && pcr=$PLATSEC_PCR
-[ -n "${PLATSEC_CHECKS+x}" ] && checks=$PLATSEC_CHECKS
-[ -n "${PLATSEC_ENFORCE+x}" ] && enforce=$PLATSEC_ENFORCE
+[ "${PLATSEC_PCR+x}" != "" ] && pcr=$PLATSEC_PCR
+[ "${PLATSEC_CHECKS+x}" != "" ] && checks=$PLATSEC_CHECKS
+[ "${PLATSEC_ENFORCE+x}" != "" ] && enforce=$PLATSEC_ENFORCE
 
 # Command line overrides everything.
 [ "$cli_pcr_set" -eq 1 ] && pcr=$cli_pcr
 [ "$cli_checks_set" -eq 1 ] && checks=$cli_checks
-[ -n "$cli_enforce" ] && enforce=$cli_enforce
+[ "$cli_enforce" != "" ] && enforce=$cli_enforce
 
 case "$pcr" in '' | *[!0-9]*) die "invalid PCR: '$pcr'" ;; esac
 [ "$pcr" -le 23 ] || die "invalid PCR: '$pcr'"
@@ -148,7 +148,7 @@ case "$enforce" in 0 | 1) ;; *) die "invalid ENFORCE value: '$enforce' (expected
 # (a pipe into while would run it in a subshell, losing $selected and die).
 selected=' '
 while IFS= read -r c; do
-    [ -n "$c" ] || continue
+    [ "$c" != "" ] || continue
     case "$c" in memenc | iommu | preboot_dma) ;; *) die "unknown check: '$c'" ;; esac
     selected="$selected$c "
 done <<EOF
@@ -281,7 +281,7 @@ done
 
 # Backstop for "something is always measured": an empty event would lock in a
 # baseline with no checks at all.
-[ -n "$event" ] || die "internal error: no check produced a result (selected:$selected)"
+[ "$event" != "" ] || die "internal error: no check produced a result (selected:$selected)"
 
 if [ "$mode" = status ]; then
     echo "$event"
