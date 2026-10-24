@@ -43,8 +43,8 @@ file goes and what every setting does.
 pcrlock generate [NAME...]     generate all enabled (or the named) components
 pcrlock list                   show components and whether they match this boot
 pcrlock prune                  drop -previous variants and UKIs of removed kernels
-pcrlock uki add ENTRY UKI [KERNEL]
-pcrlock uki remove ENTRY
+pcrlock uki add KVER UKI [KERNEL]
+pcrlock uki remove KVER
 ```
 
 Options: `--type=TYPE`, `--policy=now|mark|none`, `--dry-run`, `-v`.

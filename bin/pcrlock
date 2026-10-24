@@ -21,7 +21,6 @@ config_dir=/etc/pcrlock-toolkit
 opt_dir=/etc/pcrlock.d
 opt_policy=now
 opt_uki_component=650-uki
-opt_uki_entry_token=
 
 dry_run=0
 verbose=0
@@ -44,11 +43,11 @@ Commands:
   prune                    Remove '-previous' variants that don't match the
                            current boot, and UKI components of kernels that
                            are no longer installed.
-  uki add ENTRY UKI [KERNEL]
+  uki add KVER UKI [KERNEL]
                            Lock a UKI (and the kernel image it loads) as
-                           variant ENTRY of the UKI component. Used by the
-                           kernel-install plugin.
-  uki remove ENTRY         Remove the UKI variant ENTRY.
+                           variant KVER (the kernel version) of the UKI
+                           component. Used by the kernel-install plugin.
+  uki remove KVER          Remove the UKI variant KVER.
 
 Options:
   --type=TYPE              generate: only components of this type.
@@ -116,7 +115,6 @@ global_kv() {
     Directory) opt_dir=$2 ;;
     Policy) opt_policy=$2 ;;
     UkiComponent) opt_uki_component=$2 ;;
-    UkiEntryToken) opt_uki_entry_token=$2 ;;
     *) die "$3: unknown key '$1'" ;;
     esac
 }
@@ -469,20 +467,8 @@ remove_file() {
     : >"$tmp/changed"
 }
 
-uki_entry_token() {
-    if [[ -n $opt_uki_entry_token ]]; then
-        printf '%s\n' "$opt_uki_entry_token"
-    elif [[ -s /etc/kernel/entry-token ]]; then
-        tr -d '[:space:]' </etc/kernel/entry-token
-        echo
-    else
-        tr -d '[:space:]' </etc/machine-id
-        echo
-    fi
-}
-
 cmd_prune() {
-    local f name kver token
+    local f kver
     for f in "$opt_dir"/*.pcrlock.d/*-previous.pcrlock; do
         if is_booted "$f"; then
             debug "${f#"$opt_dir"/}: matches the current boot, keeping"
@@ -491,12 +477,11 @@ cmd_prune() {
         fi
     done
 
-    token=$(uki_entry_token)
-    for f in "$opt_dir/$opt_uki_component.pcrlock.d/$token"-*.pcrlock; do
-        name=${f##*/}
-        name=${name%.pcrlock}
-        [[ $name == *-previous ]] && continue # handled above
-        kver=${name#"$token"-}
+    # UKI variants are named <kernel version>.pcrlock.
+    for f in "$opt_dir/$opt_uki_component.pcrlock.d"/*.pcrlock; do
+        kver=${f##*/}
+        kver=${kver%.pcrlock}
+        [[ $kver == *-previous ]] && continue # handled above
         [[ -d /usr/lib/modules/$kver ]] && continue
         if is_booted "$f"; then
             debug "${f#"$opt_dir"/}: kernel $kver is gone but this is the current boot, keeping"
@@ -508,17 +493,25 @@ cmd_prune() {
     apply_policy
 }
 
+# valid_kver KVER: a kernel version usable as a variant file name. "-previous"
+# is reserved for the kept variant of the running kernel.
+valid_kver() {
+    [[ -n $1 && $1 != */* && $1 != .* ]] || die "invalid kernel version '$1'"
+    [[ $1 != *-previous ]] || die "kernel version '$1' clashes with the -previous variant name"
+}
+
 cmd_uki() {
-    local sub=${1:-} entry dir target out
+    local sub=${1:-} kver dir target out
     shift || true
     case $sub in
     add)
-        (($# >= 2 && $# <= 3)) || die "usage: $PROG uki add ENTRY UKI [KERNEL]"
-        entry=$1
+        (($# >= 2 && $# <= 3)) || die "usage: $PROG uki add KVER UKI [KERNEL]"
+        kver=$1
+        valid_kver "$kver"
         [[ -r $2 ]] || die "$2 not readable"
         [[ -z ${3:-} || -r $3 ]] || die "$3 not readable"
         dir=$opt_dir/$opt_uki_component.pcrlock.d
-        target=$dir/$entry.pcrlock
+        target=$dir/$kver.pcrlock
         out=$tmp/uki-merged.pcrlock
         "$PCRLOCK" lock-uki "$2" --pcrlock="$tmp/uki.pcrlock"
         if [[ -n ${3:-} ]]; then
@@ -533,10 +526,11 @@ cmd_uki() {
         install_variant "$out" "$target" yes
         ;;
     remove)
-        (($# == 1)) || die "usage: $PROG uki remove ENTRY"
+        (($# == 1)) || die "usage: $PROG uki remove KVER"
+        valid_kver "$1"
         target=$opt_dir/$opt_uki_component.pcrlock.d/$1.pcrlock
         if [[ -e $target ]]; then
-            remove_file "$target" "UKI entry removed"
+            remove_file "$target" "kernel $1 removed"
         else
             debug "${target#"$opt_dir"/} not present, nothing to do"
         fi

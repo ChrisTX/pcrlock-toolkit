@@ -1,6 +1,8 @@
 #!/bin/sh
 # kernel-install plugin: lock each UKI built by kernel-install as a variant of
-# the UKI pcrlock component, and drop it again when the entry is removed.
+# the UKI pcrlock component, and drop it again when the kernel is removed.
+# Variants are named after the kernel version alone (no entry token), since
+# one machine owns /etc/pcrlock.d; `pcrlock prune` relies on that name.
 # The work is done by `pcrlock uki add|remove`; see pcrlock --help.
 set -e
 
@@ -10,7 +12,6 @@ KERNEL_IMAGE="${4:-}"
 
 [ "$KERNEL_INSTALL_LAYOUT" = "uki" ] || exit 0
 
-ENTRY_NAME="${KERNEL_INSTALL_ENTRY_NAME:-$KERNEL_INSTALL_ENTRY_TOKEN-$KERNEL_VERSION}"
 verbose=
 [ "${KERNEL_INSTALL_VERBOSE:-0}" -gt 0 ] && verbose=--verbose
 
@@ -18,13 +19,13 @@ case "$COMMAND" in
 add)
     UKI_IMAGE="$KERNEL_INSTALL_STAGING_AREA/uki.efi"
     if [ ! -f "$UKI_IMAGE" ]; then
-        echo "99-pcrlock.install: no UKI built in the staging area (prebuilt UKI?); not locking $ENTRY_NAME" >&2
+        echo "99-pcrlock.install: no UKI built in the staging area (prebuilt UKI?); not locking $KERNEL_VERSION" >&2
         exit 0
     fi
-    exec /usr/bin/pcrlock $verbose uki add "$ENTRY_NAME" "$UKI_IMAGE" "$KERNEL_IMAGE"
+    exec /usr/bin/pcrlock $verbose uki add "$KERNEL_VERSION" "$UKI_IMAGE" "$KERNEL_IMAGE"
     ;;
 remove)
-    exec /usr/bin/pcrlock $verbose uki remove "$ENTRY_NAME"
+    exec /usr/bin/pcrlock $verbose uki remove "$KERNEL_VERSION"
     ;;
 esac
 

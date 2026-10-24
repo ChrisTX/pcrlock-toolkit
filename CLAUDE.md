@@ -137,6 +137,12 @@ still runs make-policy twice; that's accepted.
 loads the embedded `.linux` via LoadImage(), which the firmware measures into
 PCR 4 as a separate event. This replaced a separate inner-kernel component.
 
+**UKI variants are named `<kver>.pcrlock`.** The kernel-install plugin passes
+`$2` (the kernel version), not the entry name: `/etc/pcrlock.d` belongs to one
+machine, so the entry token adds nothing, and since v262
+`KERNEL_INSTALL_ENTRY_NAME_FORMAT` can make the entry name arbitrary, which
+would stop `prune` from finding the kernel version.
+
 **`pcrlock-prune.service`** runs early (before sysinit and before
 `systemd-pcrlock-make-policy.service`) with `--policy=none`. `now` would
 deadlock: restarting a unit ordered after itself. It sets `TMPDIR` to its
