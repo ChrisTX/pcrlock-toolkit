@@ -36,7 +36,7 @@ path in its first line.
 
 ## `pcrlock`
 
-```
+```text
 pcrlock generate [NAME...]     generate all enabled (or the named) components
 pcrlock list                   show components and whether they match this boot
 pcrlock prune                  drop -previous variants and UKIs of removed kernels
@@ -69,7 +69,7 @@ The variant that matched the running system before an update is kept as
 longer matches, before `systemd-pcrlock-make-policy.service` rebuilds the
 policy:
 
-```
+```text
 systemctl enable systemd-pcrlock-make-policy.service pcrlock-prune.service
 ```
 
@@ -97,16 +97,3 @@ Common keys: `Enabled=`, `Output=` (path relative to `/etc/pcrlock.d`),
 
 A failing component (for example a volume not unlocked via TPM this boot)
 keeps its existing file; the others still run.
-
-## Migrating from the individual scripts
-
-| Old | New |
-|---|---|
-| `pcrlock-bootloader-update` + `25-pcrlock-bootloaders.hook` | components `625-shim`, `630-systemd-boot` (`Type=pe`) + `25-pcrlock-pe.hook` |
-| `pcrlock-generate-gptloader` | `600-gpt-and-loader` (`Type=log`) |
-| `pcrlock-generate-mok` | `640-mok` (`Type=log`) |
-| `pcrlock-generate-cryptsetup` | `841-cryptsetup-secondary`, `842-cryptsetup-extra` (`Type=volume-key`) |
-| `pcrlock-generate-tsme` | `790-platsec` (`Type=platsec`) |
-| merged machine-id/file system files | `820-system-identity` (`Type=identity`) |
-| `pcrlock-remove-previous` + its service | `pcrlock prune` + `pcrlock-prune.service` |
-| `99-uki-pcrlock-measure.install` | `99-pcrlock.install` (calls `pcrlock uki`) |
