@@ -234,6 +234,7 @@ protect nothing; the kernel's `CONFIG_RESET_ATTACK_MITIGATION` (off on the
 reference kernel) would set it in the EFI stub, but userspace would then have
 to clear it on clean shutdown, which the lock forbids. The cost is a firmware
 memory wipe on every reboot. Details that matter:
+
 - efivarfs data is 4 bytes of attributes plus the value, written in one
   `write()`, and the kernel marks these variables immutable, so each write is
   wrapped in `chattr -i`/`+i` (`chattr` from e2fsprogs is needed in the initrd).

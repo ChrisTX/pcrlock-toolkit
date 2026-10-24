@@ -28,11 +28,13 @@ comments. Because the UKI is signed, the command line can't be edited at boot.
 Rebuilding the UKI also re-locks it through `99-pcrlock.install`.
 
 ### Unlock and root device
+
 - `rd.luks.options=timeout=0`: the passphrase/PIN prompt never times out.
 - `rootflags=x-systemd.device-timeout=0`: wait for the root device forever
   instead of dropping to emergency mode.
 
 ### systemd lockdown
+
 - `systemd.image_policy=root=encrypted+read-only-off:esp=unprotected+vfat:=absent+unused`:
   restricts what `systemd-gpt-auto-generator` accepts from the GPT. Root must
   be encrypted, the ESP must be unprotected vfat, and every other partition
@@ -43,6 +45,7 @@ Rebuilding the UKI also re-locks it through `99-pcrlock.install`.
   (`systemd-factory-reset-generator`, `systemd-repart`).
 
 ### LSMs, lockdown and module signatures
+
 - `lsm=landlock,lockdown,yama,integrity,apparmor,bpf`: the full LSM list,
   with AppArmor enabled. This **replaces** the kernel's default list; any LSM
   not named is off.
@@ -57,6 +60,7 @@ Rebuilding the UKI also re-locks it through `99-pcrlock.install`.
   via `sign-file-tpm2` and `/etc/dkms/framework.conf.d/mok-signing.conf`.
 
 ### IOMMU
+
 - `iommu.passthrough=0`: translate DMA (no identity default domain).
 - `iommu.strict=1`: invalidate the IOTLB synchronously on unmap. Groups become
   `DMA` instead of `DMA-FQ`, at some I/O cost.
@@ -65,6 +69,7 @@ Rebuilding the UKI also re-locks it through `99-pcrlock.install`.
 - `intel_iommu=on`: the same intent on Intel.
 
 ### Kernel self-protection (see KSPP, kernel-hardening-checker)
+
 - `bdev_allow_write_mounted=0`: no writes to block devices that are mounted.
 - `cfi=kcfi`: kernel control-flow integrity mode. Only takes effect on kernels
   built with CFI support. Currently this needs a Clang build kernel,
@@ -82,11 +87,13 @@ Rebuilding the UKI also re-locks it through `99-pcrlock.install`.
   binaries.
 
 ## Choices with performance impact
+
 - `init_on_free=1`: zero memory on free. Performance impact of 3-5% in usual workloads.
 - `slub_debug=ZF`: `Z` changes the SLUB allocator to perform redzoning
 and `F` adds sanity checks. Severe performance impact in usual workloads.
 
 ### Early sysctls
+
 `sysctl.<key>=<value>` is applied by the kernel before PID 1 starts, so it
 covers the initrd as well, and it's part of the signed and measured UKI. Only
 keys that systemd's own `sysctl.d` files don't set belong here, since
@@ -107,6 +114,7 @@ keys that systemd's own `sysctl.d` files don't set belong here, since
   or the 100th warning, so a half-broken kernel doesn't keep running.
 
 ### Crash handling and audit
+
 - `efi_pstore.pstore_disable=0`: use EFI variables as the pstore backend, so
   the oops behind a panic survives the reboot. `systemd-pstore.service` moves
   it to `/var/lib/systemd/pstore/` on the next boot (see `dracut.conf.d/pstore.conf`).
@@ -115,6 +123,7 @@ keys that systemd's own `sysctl.d` files don't set belong here, since
   large enough not to lose boot events.
 
 ### Initrd
+
 - `rd.shell=0 rd.emergency=reboot`: no initrd shell; reboot instead of
   entering emergency mode. An emergency shell would sit in front of the
   unlocked root, which is why `initrd-pcr15-seal.service` also refuses to
@@ -127,6 +136,7 @@ The files are named `99-*` so they sort after systemd's `50-default.conf` and
 `50-coredump.conf`, which would otherwise reset some of the values.
 
 `99-hardening.conf`:
+
 - `fs.protected_fifos=2`, `fs.protected_regular=2`, `fs.protected_hardlinks=1`,
   `fs.protected_symlinks=1`: stricter than systemd's defaults for FIFOs and
   regular files in sticky world-writable directories.
@@ -140,6 +150,7 @@ The files are named `99-*` so they sort after systemd's `50-default.conf` and
   `systemd-coredump` and are stored root-only.
 
 `99-network-security.conf`:
+
 - `net.ipv4.conf.*.rp_filter=1`: strict reverse path filtering. The glob is
   needed because systemd sets `rp_filter=2` per interface and the kernel uses
   the maximum of `all` and the interface value. Strict filtering can drop
@@ -161,6 +172,7 @@ each). Group membership applies from the next login.
 `install <module> /bin/false` makes every `modprobe` of the module fail. A plain
 `blacklist` line only stops autoloading by alias, so an unprivileged socket
 call could still pull the module in. Blocked:
+
 - Network protocols with a history of bugs and few users: `sctp`, `rds`,
   `tipc`, `atm`, `can`, `ieee802154`, `6lowpan`, `af_rxrpc`.
 - `n_hdlc` (TTY line discipline).
