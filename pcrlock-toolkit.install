@@ -15,6 +15,10 @@ post_install() {
     the platsec/initrd-seal components exist, then copy
       /usr/share/pcrlock-toolkit/examples/dracut.conf.d/*.conf
     to /etc/dracut.conf.d/ and rebuild the UKI.
+
+    DKMS signing with a TPM2-held MOK: copy
+      /usr/share/pcrlock-toolkit/examples/dkms/framework.conf.d/mok-signing.conf
+    to /etc/dkms/framework.conf.d/ and adjust the key paths.
 EOF
 }
 

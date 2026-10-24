@@ -31,7 +31,6 @@ backup=(
   'etc/pcrlock-toolkit/pcrlock.conf'
   'etc/pcrlock-toolkit/platsec.conf'
   'etc/pcrlock-toolkit/openssl-tpm2.cnf'
-  'etc/dkms/framework.conf.d/mok-signing.conf'
 )
 install=pcrlock-toolkit.install
 

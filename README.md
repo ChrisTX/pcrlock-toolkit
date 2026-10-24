@@ -16,8 +16,9 @@ for a TPM2-unlocked system:
   `mor-lock --status` shows the current state.
 - **`initrd-pcr15-seal.service`** + dracut module `pcr15seal`: extends a
   separator into PCR 15 at the end of the initrd.
-- **`sign-file-tpm2`**: DKMS module signing with a TPM2-held key, enabled by
-  `/etc/dkms/framework.conf.d/mok-signing.conf`. Adjust the key paths there.
+- **`sign-file-tpm2`**: DKMS module signing with a TPM2-held key. To use it,
+  copy `/usr/share/pcrlock-toolkit/examples/dkms/framework.conf.d/mok-signing.conf`
+  to `/etc/dkms/framework.conf.d/` and adjust the key paths.
 
 ## Layout
 
@@ -35,8 +36,7 @@ for a TPM2-unlocked system:
 | `pcrlock-prune.service` | runs `pcrlock prune` early at boot, before make-policy (opt-in) |
 | `/usr/lib/dracut/modules.d/91platsec`, `91morlock`, `91pcr15seal` | initrd modules (opt-in) |
 | `/usr/lib/pcrlock-toolkit/mkosi-initrd/` | `initrd.target.wants` trees for the mkosi-initrd drop-ins |
-| `/etc/dkms/framework.conf.d/mok-signing.conf` | makes DKMS sign modules with `sign-file-tpm2` |
-| `/usr/share/pcrlock-toolkit/examples/` | example components, dracut and mkosi-initrd configs, pacman hooks |
+| `/usr/share/pcrlock-toolkit/examples/` | example components, dracut and mkosi-initrd configs, pacman hooks, DKMS signing config |
 
 ### mkosi-initrd
 

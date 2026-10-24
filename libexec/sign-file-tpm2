@@ -1,7 +1,8 @@
 #!/bin/sh
 # sign-file-tpm2: DKMS module signing with a TPM2-held key via tpm2-openssl.
 #
-# DKMS's sign_file, set in /etc/dkms/framework.conf.d/mok-signing.conf:
+# DKMS's sign_file, set in /etc/dkms/framework.conf.d/mok-signing.conf
+# (example in /usr/share/pcrlock-toolkit/examples/dkms/):
 #   sign_file="/usr/lib/pcrlock-toolkit/sign-file-tpm2"
 # The OpenSSL config only loads the default and tpm2 providers; override its
 # path with SIGN_FILE_TPM2_OPENSSL_CONF if needed.

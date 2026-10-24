@@ -30,10 +30,11 @@ without a reason.
   same commit when an example changes.
 - `libexec/sign-file-tpm2` + `conf/openssl-tpm2.cnf`: DKMS signing with a
   TPM2 key. Unrelated to pcrlock; may move to its own package.
-  `conf/mok-signing.conf` installs to `/etc/dkms/framework.conf.d/` (a
-  `backup=` file), so DKMS signs with `sign-file-tpm2` as soon as the package
-  is installed. This is a deliberate exception to "everything is opt-in";
-  DKMS dictates the directory, so the toolkit-owned-name rule doesn't apply.
+  The DKMS config is an example
+  (`examples/dkms/framework.conf.d/mok-signing.conf`), not installed to
+  `/etc/dkms`: DKMS reads every file there, so installing it would turn on
+  signing for every DKMS build, the key paths are machine-specific, and it
+  would conflict with a user's existing file of the same name.
 
 ```text
 make check                      # bash -n / sh -n, then shellcheck — must pass, makepkg runs it

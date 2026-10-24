@@ -56,10 +56,10 @@ install:
 	install -Dm644 conf/pcrlock.conf                   $(DESTDIR)$(CONFDIR)/pcrlock.conf
 	install -Dm644 conf/platsec.conf                   $(DESTDIR)$(CONFDIR)/platsec.conf
 	install -Dm644 conf/openssl-tpm2.cnf               $(DESTDIR)$(CONFDIR)/openssl-tpm2.cnf
-	install -Dm644 conf/mok-signing.conf               $(DESTDIR)$(SYSCONFDIR)/dkms/framework.conf.d/mok-signing.conf
 	install -dm755                                     $(DESTDIR)$(CONFDIR)/components.d
 	install -Dm644 -t $(DESTDIR)$(DATADIR)/examples/components.d examples/components.d/*.conf
 	install -Dm644 -t $(DESTDIR)$(DATADIR)/examples/dracut.conf.d examples/dracut.conf.d/*.conf
 	install -Dm644 -t $(DESTDIR)$(DATADIR)/examples/hooks examples/hooks/*.hook
+	install -Dm644 -t $(DESTDIR)$(DATADIR)/examples/dkms/framework.conf.d examples/dkms/framework.conf.d/*.conf
 	install -Dm644 -t $(DESTDIR)$(DATADIR)/examples/mkosi-initrd/mkosi.conf.d examples/mkosi-initrd/mkosi.conf.d/*.conf
 	install -Dm644 README.md                           $(DESTDIR)$(DOCDIR)/README.md
