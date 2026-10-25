@@ -688,6 +688,38 @@ the logged content against the digest. ✗ is expected for volume-key records
     same way through `shim_certificate*.efi`: PCR 14 MokList and the
     `MokListRT` authority records. KEK and PK are config records only, so
     their read-back covers them.
+  - **Frequent rotation caveats** (firmware behaviour from memory, varies
+    by vendor):
+    - **Dual boot:** every OS's boot measures the full db into PCR 7, so
+      each rotation breaks PCR 7 seals of other OSes (BitLocker by default,
+      systemd-cryptenroll elsewhere) and causes a recovery prompt there.
+      Linux can't suspend BitLocker. The rotation interval is configurable
+      (monthly is fine for single boot); the tool warns when other OSes are
+      found in the boot entries.
+    - **`.auth` snapshot:** firmware updates often reset the keys, and
+      systemd-boot then re-enrolls from `loader/keys/auto/`. A snapshot from
+      before a rotation enrolls the old certs without the new one; the
+      current certificate file then fails and nothing boots. The snapshot
+      is rewritten in the same transaction as every db write, and failing to
+      write it fails the rotation.
+    - **Write ordering and NVRAM space:** many firmwares reclaim the
+      variable store only at boot, so a runtime write can fail with
+      `EFI_OUT_OF_RESOURCES`. Write db first and check the read-back; only
+      then swap in the re-signed files. A failed write leaves everything as
+      it was. Step 1 keeps both certs, so an interruption is harmless. Keep
+      db small.
+    - **One pending PCR 7 change at a time:** pcrlock multiplies variants
+      per component. A pending db change (2) × authority change (2) ×
+      SbatLevel bump (2) already uses all 8. Rotations are queued while
+      another rotation or a generation bump is pending, and `check_budget`
+      runs before each one. With three keys on separate schedules, this
+      serialization is needed.
+    - **Timestamps:** every full write needs a strictly newer timestamp;
+      use `max(now, last + 1 s)` so a clock that went backwards doesn't get
+      writes refused.
+    - **Flash wear:** negligible. Two writes of a few KB per rotation,
+      against `BootOrder`/`BootNext` writes and ~100k erase cycles per
+      sector.
   - **Key and file layout.** A deliberate exception to the toolkit-owned
     `/etc/pcrlock-toolkit/` naming, since `/etc/secureboot` is an
     established shared layout:
