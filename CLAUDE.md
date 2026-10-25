@@ -587,9 +587,50 @@ the logged content against the digest. ✗ is expected for volume-key records
     ROM. Own entries use a stable per-installation owner GUID; it's part of
     every PCR 7 authority record, so it must never change once enrolled.
   - **Writing the variables.** dbx additions as append writes; removals and
-    db/KEK changes as full writes with a newer timestamp. Optional, opt-in:
-    a PCR 7 variant for the tool's own db/KEK writes, since it knows the
-    exact bytes. Changes by anyone else are still never pre-accepted.
+    db/KEK changes as full writes with a newer timestamp.
+  - **PCR 7 prediction for the tool's writes** (on by default, opt-out).
+    The `Type=secureboot-policy` rule becomes: automatic updates may only
+    change dbx; writes made through the tool are user-initiated and
+    predicted exactly.
+    - Predict by reading back the variables after the write
+      (`lock-secureboot-policy`), never by modelling the firmware's storage.
+    - The tool leaves a short-lived "expected change" record (variable and
+      exact bytes written). A PK/KEK/db difference is accepted only if the
+      read-back equals it; anything else still fails, so changes by others
+      stay unaccepted even while a tool write is pending.
+    - A scheduled rotation could reuse this later.
+  - **Key rotation in two steps**, one predicted boot each, so one bootable
+    path always exists:
+    1. Write db with the new cert next to the old one (full write), and
+       re-sign shim and its helper files with the new key. Predict the db
+       config record from the read-back, and the shim authority record with
+       the old entry's `EFI_SIGNATURE_DATA` replaced by the new one, at the
+       position the current log has it.
+    2. After a successful boot, write db without the old cert and put the
+       old cert into dbx, which revokes everything it ever signed.
+
+    MOK rotation works the same way through `shim_certificate*.efi`: PCR 14
+    MokList and the `MokListRT` authority records. KEK and PK are config
+    records only, so their read-back covers them.
+  - **Key and file layout.** A deliberate exception to the toolkit-owned
+    `/etc/pcrlock-toolkit/` naming, since `/etc/secureboot` is an
+    established shared layout:
+    - `/etc/secureboot/keys/{PK,KEK,db,dbx}/`: only the signed lists built
+      from the sources, the sbkeysync keystore layout, so users can enroll
+      with sbkeysync. No private keys there, because sbkeysync parses
+      whatever those directories contain. sbkeysync only adds missing
+      entries; removals, rotations and full snapshots go through the tool,
+      and the README must say so.
+    - `/etc/secureboot/private/` (0700): private keys (TPM2 key blobs, or
+      files when opting out) and their certs.
+    - `/etc/pcrlock-toolkit/secureboot/owner-guid`: the owner GUID. It's
+      configuration that must never change, so `/etc`, not `/var/lib`. It's
+      created on first use and never regenerated while an entry with that
+      owner is enrolled. There's no canonical location; sbctl keeps its own
+      in a file named `GUID`.
+    - An existing keystore (old sbctl used `/usr/share/secureboot`, newer
+      releases `/var/lib/sbctl`) is detected, and the tool refuses to mix
+      keys with it.
   - **Microsoft dbx, staged.**
     - At runtime: download it, strip the `EFI_VARIABLE_AUTHENTICATION_2`
       header, verify Microsoft's signature against their KEK, refuse if
