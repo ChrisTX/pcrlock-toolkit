@@ -40,5 +40,5 @@ check() {
 
 package() {
   make -C "$startdir" DESTDIR="$pkgdir" install
-  install -Dm644 "$startdir/LICENSES/0BSD.txt" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$startdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
