@@ -428,6 +428,27 @@ ExitBootServices events is buggy, not a configuration to accept.
     EKU `1.3.6.1.4.1.2312.16.1.2` for images. It checks the list entry, not
     the leaf that signed the binary.
   - `shim_verify` (used for systemd-boot's loads) runs the SBAT check too.
+  - The helper files (`revocations_sbat.efi`, `shim_certificate*.efi`) go
+    through `verify_image` → `verify_buffer`, like any image shim loads:
+    - **Denylist first.** A file is revoked by its Authenticode SHA-256 or
+      SHA-1 in dbx, MokListX or the built-in vendor dbx, and every file
+      signed under a cert that matches a dbx or MokListX cert entry is
+      revoked. Only shim enforces this, since the firmware never loads
+      these files.
+    - **`.sbat` is mandatory.** A missing `.sbat` passes only for images
+      verified through the shim protocol (`in_protocol`), and these files
+      aren't.
+    - **Two levels.** `revocations_sbat.efi` is checked against the level
+      from before it's applied (first directory pass), and
+      `shim_certificate*.efi` against the level after it (second pass).
+    - **Rejected files are skipped silently.** `load_unbundled_trust` only
+      logs "Failed to load addon certificates / sbat level", and the boot
+      continues.
+    - **PCR 4.** Each file is measured into PCR 4 (`tpm_log_pe`) after it
+      verified; rejected files leave no record. The order is
+      `revocations_sbat.efi`, then the `shim_certificate*` files in
+      directory enumeration order, not by name. On FAT that's the order of
+      the directory slots, so a deleted and recreated file can change it.
   - With a pending `Mok*` request (`MokNew`, `MokSB`, …) and no MokManager,
     shim started from the removable path (`\EFI\BOOT\BOOTX64.EFI`) resets
     after a 10 s countdown, i.e. loops; elsewhere it fails to boot.
@@ -561,6 +582,28 @@ the logged content against the digest. ✗ is expected for volume-key records
     - A signing log (like a CA's) records everything db signed. Replaced
       shims, and `shim_certificate*.efi` from before a MOK rotation, go into
       dbx.
+  - **Helper files** (see the shim internals in the facts section):
+    - Old `shim_certificate*.efi` can also be revoked through SBAT: give
+      them a component of our own and raise its generation on a MOK
+      rotation. That's cheaper than dbx space.
+    - `revocations_sbat.efi` must never raise a component in its own
+      `.sbat`: it's checked again at every later boot against the level it
+      raised, and would reject itself. Simplest: no component of our own.
+    - Built on `addonx64.efi.stub`, they carry systemd's `.sbat`, as they
+      must. If the merged upstream payload raises `systemd-addon`, rebuild
+      them on the current stub.
+    - A rejection fails closed, but late. A rejected certificate file means
+      no MOK, so systemd-boot isn't trusted and shim falls back to the
+      missing MokManager. A rejected revocations file means SbatLevel isn't
+      raised and the PCR 7 prediction fails, so a recovery unlock follows.
+      Before putting files in place, the tool checks they'd pass: not in
+      dbx, and SBAT against the predicted level.
+    - Rotation step 2 (old db cert into dbx) also revokes every helper file
+      signed with the old key; they must be re-signed in step 1.
+    - The PCR 4 order follows FAT directory slots. Keep a single
+      `shim_certificate` file, or rewrite files in place instead of
+      deleting and recreating them. PCR 4 needs components for these
+      measurements.
   - **`.auth` files.** Built by the tool, not `bootctl
     --secure-boot-auto-enroll` (one key for PK, KEK and db).
     - `PK.auth`: PK, self-signed.
