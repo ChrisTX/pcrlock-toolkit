@@ -864,8 +864,12 @@ cmd_check() {
         [[ -n $pcr ]] || continue
         state=ok
         if ((n > MAX_PCR_VALUES)); then
-            state="too many (max $MAX_PCR_VALUES)"
+            state="over the limit (max $MAX_PCR_VALUES)"
             over=1
+        elif ((n == MAX_PCR_VALUES)); then
+            # Still valid, but the next -previous variant on this PCR is
+            # refused.
+            state="at the limit, no room for another variant"
         fi
         printf '%-4s %-7s %s\n' "$pcr" "$n" "$state"
     done <<<"$counts"

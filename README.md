@@ -104,8 +104,9 @@ Before every policy update `pcrlock` counts this per PCR, using `--location=`
 and `--pcr=` from the make-policy unit, and refuses to update the policy if a
 PCR is over the limit. The current policy stays in place; `pcrlock prune`
 after the next reboot usually brings the count down again. `pcrlock check`
-shows the counts. They are upper bounds: variants that happen to produce the
-same value are counted twice.
+shows the counts and marks PCRs at the limit, where the next update that
+keeps a `-previous` variant would be refused. They are upper bounds: variants
+that happen to produce the same value are counted twice.
 
 ### Boot loader updates and pruning
 
