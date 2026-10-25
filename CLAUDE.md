@@ -371,6 +371,18 @@ ExitBootServices events is buggy, not a configuration to accept.
   or it captures the runtime os-separator record and double-extends it.
 - **PCR 5.** May log the GPT event twice with loader.conf in between. One
   combined `log` component in log order (`600-gpt-and-loader`) handles it.
+- **PCR 1 boot variables** (aurora's AMI firmware, checked against efivarfs).
+  The events are `EV_EFI_VARIABLE_BOOT`, but the digest is
+  `sha256(UEFI_VARIABLE_DATA)` as for `BOOT2`, not of the data alone.
+  `BootOrder` data is the whole variable. `Boot####` data is
+  `var[6 : size-2]` with data length `size-8`: Attributes and
+  FilePathListLength are left out and the end node is cut short, so
+  `LOAD_OPTION_ACTIVE` isn't measured. The "BBS" entries (`Boot0002`–`0004`,
+  "UEFI:CD/DVD Drive", "UEFI:Removable Device", "UEFI:Network Device") are
+  firmware placeholders: a BBS device path node with device type
+  `0x81`–`0x83`, not a standard BBS type. They stay in NVRAM while missing
+  from `BootOrder`, so both variants can be rebuilt from efivarfs, but
+  entries never seen can't be predicted.
 - **PCR 9 and 12 can't be locked with a pcrlock ESP credential.** systemd-stub
   prepends the global credentials cpio (containing `pcrlock.<machine-id>.cred`)
   to the initrd. The kernel measures the combined buffer, so the measurement
@@ -390,6 +402,35 @@ ExitBootServices events is buggy, not a configuration to accept.
   with the variable's text as data, then shim verifying systemd-boot against
   db (shim doesn't deduplicate against the firmware's record). Without shim
   it's a single db record.
+- **shim internals** (read in rhboot/shim at 4dc4a1b, October 2026; source
+  only, nothing booted):
+  - SbatLevel's header row is parsed as a component named `sbat`, and every
+    binary's `.sbat` starts with `sbat,1`. A level with `sbat,2` revokes
+    everything, and shim refuses to apply a level that revokes itself.
+  - Only component name and generation are compared; the version column
+    (e.g. `262.1`) is ignored, so SBAT can't pin a build without a
+    component whose generation changes per build.
+  - The current SbatLevel is kept if its version field is higher, or if
+    its datestamp is newer **or equal** (`strncmp` of the first 10
+    characters). A replacement needs a strictly newer datestamp.
+  - `revocations_sbat.efi` (needs both `.sbata` and `.sbatl`) and
+    `shim_certificate*.efi` are read from shim's own directory, revocations
+    first. Both are verified before the MOK state is imported, so only db
+    or shim's built-in vendor cert can sign them.
+  - The `.db` ESLs of `shim_certificate*.efi` are appended to the
+    `MokListRT` mirror: shim trusts them, the kernel sees them as MOKs, and
+    they are part of the MokList event logged to PCR 14. No MokManager is
+    involved.
+  - SbatLevel is measured into PCR 7 in `import_mok_state`, after the
+    revocations file was applied. A SbatLevel overwritten by another OS is
+    restored before it's measured.
+  - `verify_eku` rejects a db or MokList entry carrying the module-signing
+    EKU `1.3.6.1.4.1.2312.16.1.2` for images. It checks the list entry, not
+    the leaf that signed the binary.
+  - `shim_verify` (used for systemd-boot's loads) runs the SBAT check too.
+  - With a pending `Mok*` request (`MokNew`, `MokSB`, …) and no MokManager,
+    shim started from the removable path (`\EFI\BOOT\BOOTX64.EFI`) resets
+    after a 10 s countdown, i.e. loops; elsewhere it fails to boot.
 - **Volume-key records.** cryptsetup's PCR 15 volume-key record differs by
   unlock method in practice. The NvPCR keyslot record
   (`tpm2-measure-keyslot-nvpcr`) carries the keyslot index.
