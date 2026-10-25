@@ -503,12 +503,117 @@ the logged content against the digest. ✗ is expected for volume-key records
   (`examples/hooks/22-update-systemd-boot.hook`).
 - **Not covered by the toolkit yet.** PCR 1 (SMBIOS/firmware config,
   BootOrder/BBS variants). Remaining PCR 7 work:
-  - A dbx tool for a local-KEK setup: verify Microsoft's signed update,
-    diff against the current dbx, refuse if anything that boots is revoked
-    (`lock-pe` Authenticode hashes), sign the additions as an append write
-    with the local KEK, predict, and rewrite `loader/keys/auto/dbx.auth`.
+  - dbx updates for a local-KEK setup: part of the Secure Boot tool below.
   - systemd PR 43420 (`NotifySecureBootUpdate`/`PrepareSecureBootUpdate`,
     takes the update payload) may replace the prediction once merged.
+- **Secure Boot tool (design, nothing written yet).** Manages the key
+  hierarchy, MOKs and signing, so that only the current boot chain passes
+  Secure Boot itself, not just the TPM policy. Reason: with dual boot,
+  another OS that doesn't seal its disks to the TPM could be attacked with
+  old binaries we signed. See the shim internals in the facts section.
+  Suggested order: key management and `.auth` building → dbx/option ROMs →
+  MOK-only signing → SBAT generations and revocations.
+  - **Keys.** tpm2-openssl by default (opt-out for file or other keys).
+    PK and KEK have a password. db and the boot MOK carry the code-signing
+    EKU; the DKMS key carries the module-signing EKU, so shim refuses
+    images signed with it while the kernel still accepts its modules. Each
+    key is enrolled directly as a self-signed cert, not under a shared CA,
+    because shim checks the EKU of the list entry, not of the leaf.
+  - **Chain.**
+    - db signs only shim, `shim_certificate*.efi` and
+      `revocations_sbat.efi`.
+    - systemd-boot and the UKI are signed with the boot MOK, so the
+      firmware won't start them without shim.
+    - The MOKs come from `shim_certificate*.efi`. `mmx64.efi` is removed
+      from the ESP and `mokutil` uninstalled, so MokList can't be changed
+      at all.
+    - Pending `Mok*` request variables are cleared at shutdown: another
+      distribution's `mokutil` in a dual boot would otherwise stop the boot,
+      or make it loop from the removable path.
+  - **SBAT generations.** Upstream and Arch never raise `systemd-boot` /
+    `systemd-stub` generations (Arch's are still 1 after
+    GHSA-6m6p-rjcq-334c), and shim ignores the version column. So we add
+    our own component per binary and raise its generation per build:
+    - Name it after an app-specific ID (`systemd-id128 machine-id
+      --app-specific=…`), not the raw machine-id.
+    - The UKI gets the line via `ukify --sbat=`. systemd-boot (and
+      optionally shim) gets its `.sbat` patched before signing, and PCR 4
+      then locks the patched binary.
+    - Generations go through `atoi` into a `UINT16`.
+  - **SbatLevel.** Always the merge of upstream's latest level (shim's
+    `.sbatlevel`) and our lines, taking the maximum generation per
+    component.
+    - Precedence comes from a far-future datestamp (about today + 100
+      years), never `sbat,2`, which revokes everything.
+    - Each bump must be strictly newer: store the last value and use
+      `max(last + 1, today + 100 years)`.
+    - Consequences: no built-in shim payload applies on this machine again,
+      so the merge has to be kept up. Undoing it needs Secure Boot off and
+      an `SbatPolicy` reset.
+    - An overwrite by another OS is restored before the next measurement,
+      so PCR 7 doesn't change.
+  - **Revocations.**
+    - `revocations_sbat.efi` (same payload in `.sbata` and `.sbatl`) is
+      built and signed with db when the UKI or systemd-boot is built.
+    - `pcrlock-prune.service` only moves it into place, after a boot has
+      reached switch-root with the new binary, so the previous one stays as
+      a fallback until then and no db key is used in early boot.
+    - A signing log (like a CA's) records everything db signed. Replaced
+      shims, and `shim_certificate*.efi` from before a MOK rotation, go into
+      dbx.
+  - **`.auth` files.** Built by the tool, not `bootctl
+    --secure-boot-auto-enroll` (one key for PK, KEK and db).
+    - `PK.auth`: PK, self-signed.
+    - `KEK.auth`: own KEK, plus optional Microsoft or manufacturer KEKs,
+      signed by PK.
+    - `db.auth`: own db cert, option ROM hashes, extra ESLs and the chosen
+      Microsoft CAs, signed by KEK.
+    - `dbx.auth`: a full snapshot, signed by KEK.
+    - The `loader/keys/auto/` copies are always full snapshots of the
+      current state.
+  - **KEK/db/dbx sources.** `/etc/pcrlock-toolkit/secureboot/{KEK,db,dbx}.d/*.conf`,
+    `Key=Value` and parsed, merged in name order. A CLI only adds and
+    removes these files and builds/applies from them. Types:
+    - `certificate`, `sha256`, `esl`
+    - `firmware-default`: `KEKDefault`/`dbDefault`/`dbxDefault`, like
+      sbctl's built-in keys; not every board has them
+    - `microsoft`: named subsets, e.g. only Microsoft Option ROM UEFI CA
+      2023, or the full set for dual boot
+    - `signing-log`: our own revoked binaries, for dbx
+    - `microsoft-dbx`: the staged, verified update
+
+    Option ROM hashes come from the PCR 2 `EV_EFI_BOOT_SERVICES_DRIVER`
+    digests. On aurora that equals the Authenticode hash of the RTX 4090's
+    ROM. Own entries use a stable per-installation owner GUID; it's part of
+    every PCR 7 authority record, so it must never change once enrolled.
+  - **Writing the variables.** dbx additions as append writes; removals and
+    db/KEK changes as full writes with a newer timestamp. Optional, opt-in:
+    a PCR 7 variant for the tool's own db/KEK writes, since it knows the
+    exact bytes. Changes by anyone else are still never pre-accepted.
+  - **Microsoft dbx, staged.**
+    - At runtime: download it, strip the `EFI_VARIABLE_AUTHENTICATION_2`
+      header, verify Microsoft's signature against their KEK, refuse if
+      anything that boots is revoked (`lock-pe` Authenticode hashes), and
+      stage it.
+    - At the next boot, before the ready phase: sign the staged update
+      with the KEK. Its password is a `systemd-creds` credential bound to
+      an early-boot PCR 11 policy that `ready` invalidates.
+    - Then predict PCR 7 and rewrite `dbx.auth`. fwupd's `uefi_dbx` can't
+      work without Microsoft's KEK; disable it.
+  - **PCR 7/14 shape.** Late authorities become roughly
+    `[db (shim), SbatLevel, MokListRT (systemd-boot), …]`, and every
+    generation bump adds a SbatLevel variant. `Type=secureboot-authority`
+    and the PCR 14 component (MokList now includes the
+    `shim_certificate` certs) need updating.
+  - **Own shim package** (AUR, from Arch's PKGBUILD): `REQUIRE_TPM`, the
+    loader path set to systemd-boot's default path so systemd-boot updates
+    work unchanged, no `fbx64.efi` next to a shim in `\EFI\BOOT`, and
+    optionally its `.sbat` patched before signing.
+    `ENABLE_CODESIGN_EKU` is broken upstream: since the OpenSSL 3.5.0
+    migration it only compiles `CryptPkcs7VerifyEku.c`, and nothing calls
+    `VerifyEKUsInPkcs7Signature` (PKCS#7 verification uses
+    `X509_PURPOSE_ANY`). It needs an upstream fix (possible PR) before it
+    can be used here.
 - **Packaging.** `PKGBUILD` builds from the working tree; switch to a tagged
   source before publishing.
 
