@@ -427,6 +427,14 @@ ExitBootServices events is buggy, not a configuration to accept.
   - `verify_eku` rejects a db or MokList entry carrying the module-signing
     EKU `1.3.6.1.4.1.2312.16.1.2` for images. It checks the list entry, not
     the leaf that signed the binary.
+  - Certificate entries in dbx/MokListX are matched only as full X.509
+    (`EFI_CERT_TYPE_X509_GUID`). shim doesn't support
+    `EFI_CERT_X509_SHA256`, so every cert revoked through dbx costs a full
+    certificate of space, and for the helper files shim is the only one
+    checking.
+  - shim deduplicates its own PCR 7 authority records
+    (`tpm_data_measured`): each db or MokList entry it verifies with is
+    measured once per boot, the first time it's used.
   - `shim_verify` (used for systemd-boot's loads) runs the SBAT check too.
   - The helper files (`revocations_sbat.efi`, `shim_certificate*.efi`) go
     through `verify_image` → `verify_buffer`, like any image shim loads:
@@ -540,9 +548,18 @@ the logged content against the digest. ✗ is expected for volume-key records
     images signed with it while the kernel still accepts its modules. Each
     key is enrolled directly as a self-signed cert, not under a shared CA,
     because shim checks the EKU of the list entry, not of the leaf.
+  - **Per-purpose db keys**, each rotated on its own schedule through KEK:
+    - **shim key:** signs shim only, which changes about once a year.
+    - **revocations key:** signs `revocations_sbat.efi`. Rotated often
+      (e.g. monthly), so an old revocations file can't downgrade SbatLevel
+      after an SbatLevel or NVRAM reset: it no longer verifies once its key
+      is gone from db.
+    - **certificates key:** signs `shim_certificate*.efi`. Rotated whenever
+      a MOK changes, so an old certificate file with a possibly compromised
+      MOK stops verifying.
   - **Chain.**
-    - db signs only shim, `shim_certificate*.efi` and
-      `revocations_sbat.efi`.
+    - db keys sign only shim, `shim_certificate*.efi` and
+      `revocations_sbat.efi`, each with its own key.
     - systemd-boot and the UKI are signed with the boot MOK, so the
       firmware won't start them without shim.
     - The MOKs come from `shim_certificate*.efi`. `mmx64.efi` is removed
@@ -575,31 +592,39 @@ the logged content against the digest. ✗ is expected for volume-key records
       so PCR 7 doesn't change.
   - **Revocations.**
     - `revocations_sbat.efi` (same payload in `.sbata` and `.sbatl`) is
-      built and signed with db when the UKI or systemd-boot is built.
+      built and signed with the revocations key when the UKI or
+      systemd-boot is built. It changes with every generation bump, so its
+      old versions are never revoked by hash in dbx; rotating the
+      revocations key cuts them off.
     - `pcrlock-prune.service` only moves it into place, after a boot has
       reached switch-root with the new binary, so the previous one stays as
       a fallback until then and no db key is used in early boot.
-    - A signing log (like a CA's) records everything db signed. Replaced
-      shims, and `shim_certificate*.efi` from before a MOK rotation, go into
-      dbx.
+    - A signing log (like a CA's) records everything the db keys signed.
+      Replaced shims go into dbx by hash (rare, small). Helper files are cut
+      off by key rotation, not by dbx.
   - **Helper files** (see the shim internals in the facts section):
-    - Old `shim_certificate*.efi` can also be revoked through SBAT: give
-      them a component of our own and raise its generation on a MOK
-      rotation. That's cheaper than dbx space.
-    - `revocations_sbat.efi` must never raise a component in its own
-      `.sbat`: it's checked again at every later boot against the level it
-      raised, and would reject itself. Simplest: no component of our own.
-    - Built on `addonx64.efi.stub`, they carry systemd's `.sbat`, as they
-      must. If the merged upstream payload raises `systemd-addon`, rebuild
-      them on the current stub.
+    - **No SBAT component of our own**, for either kind:
+      - Revocations files are already ordered by the datestamp in their
+        `sbat,1,<datestamp>` header.
+      - SBAT can't protect against a reset SbatLevel either: the file is
+        checked against the level that was just reset.
+      - An SBAT component on certificate files falls to the same attack
+        (reset SbatLevel, remove the current revocations file); key
+        rotation doesn't.
+      - A revocations file that raised its own component would also reject
+        itself at every later boot.
+    - Built on `addonx64.efi.stub`, they carry systemd's `.sbat` only
+      because shim requires one (`systemd-addon` stays at 1 on Arch). shim
+      only parses these files and never executes them, so the stub's own
+      vulnerabilities don't matter.
     - A rejection fails closed, but late. A rejected certificate file means
       no MOK, so systemd-boot isn't trusted and shim falls back to the
       missing MokManager. A rejected revocations file means SbatLevel isn't
       raised and the PCR 7 prediction fails, so a recovery unlock follows.
       Before putting files in place, the tool checks they'd pass: not in
       dbx, and SBAT against the predicted level.
-    - Rotation step 2 (old db cert into dbx) also revokes every helper file
-      signed with the old key; they must be re-signed in step 1.
+    - Rotation step 2 (old cert removed from db) cuts off every file signed
+      with the old key; they must be re-signed in step 1.
     - The PCR 4 order follows FAT directory slots. Keep a single
       `shim_certificate` file, or rewrite files in place instead of
       deleting and recreating them. PCR 4 needs components for these
@@ -609,7 +634,7 @@ the logged content against the digest. ✗ is expected for volume-key records
     - `PK.auth`: PK, self-signed.
     - `KEK.auth`: own KEK, plus optional Microsoft or manufacturer KEKs,
       signed by PK.
-    - `db.auth`: own db cert, option ROM hashes, extra ESLs and the chosen
+    - `db.auth`: own db certs (one per purpose), option ROM hashes, extra ESLs and the chosen
       Microsoft CAs, signed by KEK.
     - `dbx.auth`: a full snapshot, signed by KEK.
     - The `loader/keys/auto/` copies are always full snapshots of the
@@ -645,16 +670,24 @@ the logged content against the digest. ✗ is expected for volume-key records
   - **Key rotation in two steps**, one predicted boot each, so one bootable
     path always exists:
     1. Write db with the new cert next to the old one (full write), and
-       re-sign shim and its helper files with the new key. Predict the db
-       config record from the read-back, and the shim authority record with
-       the old entry's `EFI_SIGNATURE_DATA` replaced by the new one, at the
+       re-sign every file the key signs. Predict the db config record from
+       the read-back, and the authority record for that key with the old
+       entry's `EFI_SIGNATURE_DATA` replaced by the new one, at the
        position the current log has it.
-    2. After a successful boot, write db without the old cert and put the
-       old cert into dbx, which revokes everything it ever signed.
+    2. After a successful boot, write db without the old cert. That alone
+       makes everything the old key signed fail the allowlist.
 
-    MOK rotation works the same way through `shim_certificate*.efi`: PCR 14
-    MokList and the `MokListRT` authority records. KEK and PK are config
-    records only, so their read-back covers them.
+    Old db certs are **removed, not put into dbx**, so frequent rotations
+    don't grow dbx (which would cost a full certificate each, see the shim
+    internals). A dbx entry would only help against a db rollback, which in
+    user mode needs the KEK (time-based writes must be newer). The other
+    route, an NVRAM reset into setup mode, also clears dbx and lets an
+    attacker enroll their own keys anyway.
+
+    Each db key has its own pending rotation state. MOK rotation works the
+    same way through `shim_certificate*.efi`: PCR 14 MokList and the
+    `MokListRT` authority records. KEK and PK are config records only, so
+    their read-back covers them.
   - **Key and file layout.** A deliberate exception to the toolkit-owned
     `/etc/pcrlock-toolkit/` naming, since `/etc/secureboot` is an
     established shared layout:
@@ -684,11 +717,21 @@ the logged content against the digest. ✗ is expected for volume-key records
       an early-boot PCR 11 policy that `ready` invalidates.
     - Then predict PCR 7 and rewrite `dbx.auth`. fwupd's `uefi_dbx` can't
       work without Microsoft's KEK; disable it.
-  - **PCR 7/14 shape.** Late authorities become roughly
-    `[db (shim), SbatLevel, MokListRT (systemd-boot), …]`, and every
-    generation bump adds a SbatLevel variant. `Type=secureboot-authority`
-    and the PCR 14 component (MokList now includes the
-    `shim_certificate` certs) need updating.
+  - **PCR 7/14 shape.** Late authorities become roughly:
+
+    ```text
+    db (shim key)           firmware verifying shim
+    db (revocations key)    shim, revocations_sbat.efi
+    db (certificates key)   shim, shim_certificate*.efi
+    SbatLevel               import_mok_state, after the helper files
+    MokListRT (boot MOK)    systemd-boot, …
+    ```
+
+    shim measures each entry once per boot. Every generation bump adds a
+    SbatLevel variant, and every rotation changes one authority record plus
+    the db config record; both are predicted. `Type=secureboot-authority`
+    and the PCR 14 component (MokList now includes the `shim_certificate`
+    certs) need updating.
   - **Own shim package** (AUR, from Arch's PKGBUILD): `REQUIRE_TPM`, the
     loader path set to systemd-boot's default path so systemd-boot updates
     work unchanged, no `fbx64.efi` next to a shim in `\EFI\BOOT`, and
