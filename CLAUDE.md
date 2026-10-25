@@ -432,6 +432,12 @@ ExitBootServices events is buggy, not a configuration to accept.
     `EFI_CERT_X509_SHA256`, so every cert revoked through dbx costs a full
     certificate of space, and for the helper files shim is the only one
     checking.
+  - A db (or MokListRT) **hash** match is measured like a cert match:
+    `check_db_hash_in_ram` logs the matching `EFI_SIGNATURE_DATA` (owner
+    GUID + hash) as `EV_EFI_VARIABLE_AUTHORITY` in PCR 7. EDK2-based
+    firmware does the same as far as known; on aurora, the early
+    authority record before the separator is probably the RTX 4090 ROM
+    hash (not checked yet).
   - shim deduplicates its own PCR 7 authority records
     (`tpm_data_measured`): each db or MokList entry it verifies with is
     measured once per boot, the first time it's used.
@@ -720,6 +726,33 @@ the logged content against the digest. ✗ is expected for volume-key records
     - **Flash wear:** negligible. Two writes of a few KB per rotation,
       against `BootOrder`/`BootNext` writes and ~100k erase cycles per
       sector.
+  - **Per-binary db entries (evaluated, not planned).** Idea: an ephemeral
+    key per systemd-boot/UKI build, its cert written to db and the private
+    key discarded, replacing the previous one each iteration. Revoking by
+    removal from db survives an SbatLevel reset, unlike SBAT. But:
+    - **No benefit over a hash.** db hash matches produce a PCR 7
+      authority record too (see the shim internals), so a per-binary
+      `sha256` entry gives the same measurement without keys.
+    - **KEK per iteration.** Step 2 (removing the old entry after a good
+      boot) can be pre-signed at build time with timestamp + 1, but the
+      build still needs the KEK. A password would prompt in every
+      kernel-install run, and the early-boot PCR 11 credential isn't usable
+      at runtime. That works against protecting the KEK at all.
+    - **Bypasses shim.** Anything in db can be started by the firmware
+      directly: no `shim_certificate` MOKs (the kernel lacks the DKMS key),
+      no SBAT check. Using an entry in the MOK list via a new
+      `shim_certificate*.efi` per iteration avoids that, but shim loads
+      every certificate file present, so an old one placed next to the
+      current one is trusted again unless the certificates key rotates each
+      time: a db write again.
+    - **PCR 7 churn.** Every iteration changes the db config record and an
+      authority record, competing with rotations and SbatLevel bumps for
+      the 8-value budget.
+
+    Conclusion: at most per-binary db hashes for systemd-boot on single
+    boot (rare updates), accepting a KEK signature per update and that it
+    can be started without shim. Not for UKIs; their revocation stays with
+    SBAT generations and the rotated revocations key.
   - **Key and file layout.** A deliberate exception to the toolkit-owned
     `/etc/pcrlock-toolkit/` naming, since `/etc/secureboot` is an
     established shared layout:
