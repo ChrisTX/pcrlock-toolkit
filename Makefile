@@ -47,6 +47,8 @@ install:
 	install -Dm644 units/pcrlock-secureboot-policy.path  $(DESTDIR)$(UNITDIR)/pcrlock-secureboot-policy.path
 	install -Dm644 units/pcrlock-secureboot-policy.service $(DESTDIR)$(UNITDIR)/pcrlock-secureboot-policy.service
 	install -Dm644 units/pcrlock-firmware-relock.service $(DESTDIR)$(UNITDIR)/pcrlock-firmware-relock.service
+	install -Dm644 units/pcrlock-firmware-suspend.path $(DESTDIR)$(UNITDIR)/pcrlock-firmware-suspend.path
+	install -Dm644 units/pcrlock-firmware-suspend.service $(DESTDIR)$(UNITDIR)/pcrlock-firmware-suspend.service
 	install -Dm755 dracut/91platsec/module-setup.sh    $(DESTDIR)$(DRACUTDIR)/91platsec/module-setup.sh
 	install -Dm755 dracut/91pcr15seal/module-setup.sh  $(DESTDIR)$(DRACUTDIR)/91pcr15seal/module-setup.sh
 	install -Dm755 dracut/91morlock/module-setup.sh    $(DESTDIR)$(DRACUTDIR)/91morlock/module-setup.sh

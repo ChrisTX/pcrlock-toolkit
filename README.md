@@ -36,6 +36,7 @@ for a TPM2-unlocked system:
 | `pcrlock-prune.service` | runs `pcrlock prune` early at boot, before make-policy (opt-in) |
 | `pcrlock-secureboot-policy.path` | regenerates the Secure Boot policy component when dbx changes (opt-in) |
 | `pcrlock-firmware-relock.service` | locks the firmware PCRs again on the boot after `pcrlock suspend-firmware` (opt-in) |
+| `pcrlock-firmware-suspend.path` | runs `pcrlock suspend-firmware` when fwupd stages a UEFI capsule (opt-in) |
 | `/usr/lib/dracut/modules.d/91platsec`, `91morlock`, `91pcr15seal` | initrd modules (opt-in) |
 | `/usr/lib/pcrlock-toolkit/mkosi-initrd/` | `initrd.target.wants` trees for the mkosi-initrd drop-ins |
 | `/usr/share/pcrlock-toolkit/examples/` | example components, dracut and mkosi-initrd configs, pacman hooks, DKMS signing config |
@@ -67,7 +68,7 @@ pcrlock prune                  drop -previous variants and UKIs of removed kerne
 pcrlock uki add KVER UKI [KERNEL]
 pcrlock uki remove KVER
 pcrlock check                  show how many values each PCR can take (max 8)
-pcrlock suspend-firmware [PCRS]
+pcrlock suspend-firmware [--if-capsule-pending] [PCRS]
 pcrlock relock-firmware
 ```
 
@@ -256,3 +257,27 @@ signature-checked by the firmware, but nothing else is. Keep the window
 short. systemd-pcrlock-make-policy.service runs once at boot before the
 relock and fails under `--strict=yes` with the stale firmware components;
 that's expected.
+
+**With fwupd.** fwupd's own `systemd-pcrlock` plugin doesn't help here: it
+only drops systemd's generated components in `/var/lib/pcrlock.d`, so the
+policy built from `/etc/pcrlock.d` stays the same and the boot after the
+update asks for the recovery key. To suspend automatically instead:
+
+```text
+systemctl enable --now pcrlock-firmware-suspend.path pcrlock-firmware-relock.service
+```
+
+Any change in efivarfs starts `pcrlock suspend-firmware --if-capsule-pending`,
+which suspends only if fwupd's uefi-capsule plugin staged an update:
+
+- an `fwupd-*-0abba7dc-e516-4167-bbf5-4d9d1c739416` variable with status
+  "attempt update" (updates applied by `fwupdx64.efi`)
+- or bit 2 of `OsIndications` (capsule on disk)
+
+A suspension is made once per staged update: its fingerprint (the variables
+above and the capsule files on the ESP with size and mtime) goes to
+`/var/lib/pcrlock-toolkit/capsule-suspended`. If the firmware didn't apply
+the update and it's still pending after the relock, it's not suspended for
+again; stage it again (which rewrites the capsule file) or run
+`pcrlock suspend-firmware` by hand. Capsules staged another way (Dell's
+recovery file, U-Boot without `OsIndications`, other tools) aren't detected.

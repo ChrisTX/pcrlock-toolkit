@@ -19,7 +19,8 @@ without a reason.
   without a key and measures the resulting state.
 - `units/`: `platsec-pcr-check.service`, `mor-lock.service`,
   `initrd-pcr15-seal.service`, `pcrlock-prune.service`,
-  `pcrlock-secureboot-policy.{path,service}`, `pcrlock-firmware-relock.service`.
+  `pcrlock-secureboot-policy.{path,service}`, `pcrlock-firmware-relock.service`,
+  `pcrlock-firmware-suspend.{path,service}`.
 - `dracut/91platsec`, `dracut/91morlock`, `dracut/91pcr15seal`: initrd
   modules, opt-in via `add_dracutmodules`.
 - `kernel-install/99-pcrlock.install`: thin wrapper around `pcrlock uki`.
@@ -234,6 +235,22 @@ do: one boot without the firmware PCRs. Details that matter:
 - PCR lists are parsed with `read_pcrs`, never via `< <(...)`: a failing parse
   inside process substitution doesn't stop the caller, which once let a
   relock "succeed" with no PCRs and delete the state file.
+- `pcrlock-firmware-suspend.path` automates the suspension for fwupd, whose
+  own pcrlock plugin only drops systemd's `/var/lib` components (its
+  `Lock(lock=false)` Varlink call) and so leaves `/etc/pcrlock.d` policies
+  unchanged. fwupd plugins are built in, so a toolkit-side fwupd plugin
+  isn't an option. Detection follows fwupd's uefi-capsule source:
+  `fwupd-<class>-<hw_inst>` in GUID `0abba7dc-…` holds `EFI_UPDATE_INFO`
+  (status u32 at struct offset 48, 1 = attempt update; efivarfs adds 4 bytes
+  of attributes), and capsule on disk sets `OsIndications` bit 2.
+  - The watch is `PathChanged=` on the efivars directory, since the variable
+    name contains the ESRT class and the hardware instance. Events while the
+    service runs don't start it again, hence the `sleep 2` before checking.
+  - A stale pending state (firmware didn't apply the capsule) would otherwise
+    suspend again after every relock. The fingerprint in `capsule-suspended`
+    (pending variables + ESP capsule files with size and mtime) allows one
+    suspension per staged update; staging again rewrites the file and
+    changes the mtime.
 
 **No option ROM variants.** Option ROMs verified before the separator (e.g.
 KVMs a server provider attaches) add authority records that could be
@@ -422,8 +439,15 @@ the logged content against the digest. ✗ is expected for volume-key records
 - `suspend-firmware`/`relock-firmware` through a real capsule update (only
   stubs so far): whether the firmware boots the OS once while applying the
   capsule, and that make-policy accepts the drop-in's `--pcr=` list.
-- `pcrlock-secureboot-policy.path` firing on an efivarfs write (fwupd's dbx
-  update on the RAID server is the planned test).
+- `pcrlock-secureboot-policy.path` and `pcrlock-firmware-suspend.path`
+  firing on a real fwupd update (fwupd's dbx update on the RAID server is the
+  planned test), and the capsule detection against a real `fwupdmgr update`
+  (only checked against fwupd's source and fake efivars). efivarfs does emit
+  inotify events (fsnotify is in the VFS): on aurora, creating a variable via
+  efivarfs gave `CREATE`, `CLOSE_WRITE` and `DELETE` on the directory, even
+  though the write failed (a volatile variable can't be created at runtime,
+  `EINVAL`; efivarfs removes the file again). A `.path` unit with
+  `PathChanged=` on a directory fires for such child events.
 
 ## Open items
 

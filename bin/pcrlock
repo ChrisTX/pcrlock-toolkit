@@ -26,7 +26,13 @@ readonly DEFAULT_PCRS=0-5,7,11,13-15
 readonly SUSPEND_DROPIN=/run/systemd/system/$MAKE_POLICY_UNIT.d/zz-pcrlock-toolkit-suspend-firmware.conf
 readonly SUSPEND_STATE=/var/lib/pcrlock-toolkit/firmware-suspended
 readonly RELOCK_UNIT=pcrlock-firmware-relock.service
+# suspend-firmware --if-capsule-pending: the staged capsule update that was
+# last suspended for, so a stale one doesn't suspend again on every boot.
+readonly CAPSULE_STATE=/var/lib/pcrlock-toolkit/capsule-suspended
 readonly EFIVARS=/sys/firmware/efi/efivars
+# fwupd's vendor GUID for its update info variables, and the EFI global one.
+readonly FWUPD_GUID=0abba7dc-e516-4167-bbf5-4d9d1c739416
+readonly EFI_GLOBAL_GUID=8be4df61-93ca-11d2-aa0d-00e098032b8c
 readonly SHIM_LOCK_GUID=605dab50-e046-4300-abb6-3dd810dd8b23
 # shim's SBAT_VAR_ORIGINAL, the shortest valid SbatLevel.
 readonly SBAT_ORIGINAL=$'sbat,1,2021030218\n'
@@ -48,6 +54,8 @@ policy_cli=
 type_filter=
 changed=0
 no_apply=0
+if_capsule_pending=0
+capsule_fp=
 # Set by make_policy_argv.
 mp_argv=()
 mp_pcrs=()
@@ -82,7 +90,9 @@ Commands:
   suspend-firmware [PCRS]  Take the firmware PCRs (default: SuspendPCRs= in
                            pcrlock.conf, else $opt_suspend_pcrs) out of the
                            policy until the next boot, for a firmware update.
-  relock-firmware          Lock them again: regenerate their components from
+                           With --if-capsule-pending, only if fwupd staged a
+                           UEFI capsule (run by pcrlock-firmware-suspend.path).
+  relock-firmware         Lock them again: regenerate their components from
                            the event log and rebuild the full policy. Run by
                            $RELOCK_UNIT on the next boot.
 
@@ -93,6 +103,8 @@ Options:
                            mark: mark it for restart (pacman's restart-marked hook)
                            none: leave it to you
                            Default: Policy= in pcrlock.conf, else "now".
+  --if-capsule-pending     suspend-firmware: do nothing unless a UEFI capsule
+                           update is staged and wasn't suspended for yet.
   --dry-run                Show what would change without writing anything.
   --config-dir=DIR         Configuration directory (default: $config_dir).
   -v, --verbose            More output.
@@ -867,10 +879,65 @@ suspend_notice() {
     fi
 }
 
+# pending_capsules: prints what fwupd's uefi-capsule plugin staged for the next
+# boot, one line each, and fails if nothing is. Two methods:
+# - fwupd.efi: fwupd-<class>-<hw_inst> holds EFI_UPDATE_INFO; status (u32 at
+#   48, after the 4 bytes of efivarfs attributes) 1 is ATTEMPT_UPDATE.
+# - capsule on disk: OsIndications bit 2 (FILE_CAPSULE_DELIVERY_SUPPORTED).
+# The capsule files on the ESP follow with size and mtime, so that staging an
+# update again gives a new fingerprint.
+pending_capsules() {
+    local f v esp n=0
+    for f in "$EFIVARS"/fwupd-*-"$FWUPD_GUID"; do
+        v=$(od -An -tu4 --endian=little -j 52 -N 4 -- "$f")
+        if [[ ${v//[[:space:]]/} == 1 ]]; then
+            echo "efivar ${f##*/}"; n=$((n + 1))
+        fi
+    done
+    f=$EFIVARS/OsIndications-$EFI_GLOBAL_GUID
+    v=
+    [[ ! -e $f ]] || v=$(od -An -tu1 -j 4 -N 1 -- "$f")
+    v=${v//[[:space:]]/}
+    if ((${v:-0} & 4)); then
+        echo "efivar ${f##*/} capsule-on-disk"; n=$((n + 1))
+    fi
+    ((n)) || return 1
+    if esp=$(bootctl --print-esp-path 2>/dev/null) && [[ -d $esp/EFI ]]; then
+        find "$esp/EFI" -maxdepth 3 -type f \
+            \( -ipath '*/UpdateCapsule/*' -o -ipath '*/fw/fwupd-*.cap' \) \
+            -printf 'file %P %s %T@\n' | sort
+    else
+        warn "can't find the ESP; a capsule staged again would look the same"
+    fi
+}
+
+# capsule_check: for --if-capsule-pending. Succeeds (and sets capsule_fp) if a
+# capsule update is staged and no suspension was made for it yet.
+capsule_check() {
+    if [[ -e $SUSPEND_STATE ]]; then
+        log "firmware PCRs are already suspended"
+        return 1
+    fi
+    if ! pending_capsules >"$tmp/capsules"; then
+        log "no UEFI capsule update is staged"
+        return 1
+    fi
+    capsule_fp=$(sha256sum <"$tmp/capsules")
+    capsule_fp=${capsule_fp%% *}
+    if [[ -e $CAPSULE_STATE && $(<"$CAPSULE_STATE") == "$capsule_fp" ]]; then
+        warn "the staged capsule update was already suspended for once and is still pending ($(paste -sd ';' "$tmp/capsules")); not suspending again. Stage it again if the firmware didn't apply it."
+        return 1
+    fi
+    log "UEFI capsule update staged: $(paste -sd ';' "$tmp/capsules")"
+}
+
 cmd_suspend_firmware() {
     local p w
     local -a want suspend=() keep=() argv=()
     ((!dry_run)) || die "suspend-firmware doesn't support --dry-run"
+    if ((if_capsule_pending)); then
+        capsule_check || return 0
+    fi
     systemctl is-enabled --quiet "$RELOCK_UNIT" ||
         die "$RELOCK_UNIT is not enabled, so the firmware PCRs would stay out of the policy after the update; run 'systemctl enable $RELOCK_UNIT' first"
     read_pcrs want "${@:-$opt_suspend_pcrs}"
@@ -902,7 +969,12 @@ cmd_suspend_firmware() {
         systemctl daemon-reload
         die "$MAKE_POLICY_UNIT failed; nothing was suspended"
     fi
-    log "PCRs ${suspend[*]} are out of the policy until they are locked again. Stage the firmware update now; $RELOCK_UNIT locks them again on the next boot."
+    if [[ -n $capsule_fp ]]; then
+        echo "$capsule_fp" >"$CAPSULE_STATE"
+        log "PCRs ${suspend[*]} are out of the policy for the staged update; $RELOCK_UNIT locks them again on the next boot."
+    else
+        log "PCRs ${suspend[*]} are out of the policy until they are locked again. Stage the firmware update now; $RELOCK_UNIT locks them again on the next boot."
+    fi
 }
 
 suspend_kv() {
@@ -1056,6 +1128,7 @@ main() {
     while (($#)); do
         case $1 in
         --dry-run) dry_run=1 ;;
+        --if-capsule-pending) if_capsule_pending=1 ;;
         -v | --verbose) verbose=1 ;;
         --policy=*) policy_cli=${1#*=} ;;
         --type=*) type_filter=${1#*=} ;;
@@ -1073,6 +1146,8 @@ main() {
     args=("${args[@]:1}")
 
     case $policy_cli in '' | now | mark | none) ;; *) die "--policy must be now, mark or none" ;; esac
+    ((!if_capsule_pending)) || [[ $cmd == suspend-firmware ]] ||
+        die "--if-capsule-pending only applies to suspend-firmware"
     ((EUID == 0)) || die "must be run as root (the event log and $(printf %q "$opt_dir") need it)"
 
     load_global

@@ -1,0 +1,17 @@
+#  Suspend the firmware PCRs when fwupd stages a UEFI capsule update. fwupd
+#  writes an EFI variable for every capsule it stages (its update info for
+#  fwupd.efi, or OsIndications for capsule on disk), so any change in efivarfs
+#  starts the check; the service does nothing unless an update is pending.
+#
+#  Needs pcrlock-firmware-relock.service, which locks them again on the next
+#  boot; without it the service fails and nothing is suspended.
+
+[Unit]
+Description=Watch for staged UEFI capsule updates for pcrlock
+Documentation=file:///usr/share/doc/pcrlock-toolkit/README.md
+
+[Path]
+PathChanged=/sys/firmware/efi/efivars
+
+[Install]
+WantedBy=paths.target

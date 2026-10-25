@@ -1,0 +1,14 @@
+#  Started by pcrlock-firmware-suspend.path. Takes the firmware PCRs out of the
+#  policy if fwupd staged a UEFI capsule update that wasn't suspended for yet.
+
+[Unit]
+Description=Suspend firmware PCRs for a staged UEFI capsule update
+Documentation=file:///usr/share/doc/pcrlock-toolkit/README.md
+After=systemd-pcrlock-make-policy.service pcrlock-firmware-relock.service
+
+[Service]
+Type=oneshot
+# fwupd writes several variables in a row. Changes while this runs don't start
+# it again, so let them settle before looking.
+ExecStartPre=/usr/bin/sleep 2
+ExecStart=/usr/bin/pcrlock suspend-firmware --if-capsule-pending
