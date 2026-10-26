@@ -1,0 +1,582 @@
+#!/usr/bin/python3
+"""Decode the event_data of TPM event log records, as printed by
+`systemd-pcrlock cel` (a JSON array of records) or found in .pcrlock files
+({"records": [...]}).
+
+Standard library only; certificates are described with the openssl command
+if it is available. Part of pcrlock-toolkit, run as `pcrlock decode`.
+"""
+
+import argparse
+import hashlib
+import json
+import shutil
+import struct
+import subprocess
+import sys
+
+# Mixed-endian GUID strings as UEFI writes them.
+KNOWN_GUIDS = {
+    "8be4df61-93ca-11d2-aa0d-00e098032b8c": "EFI_GLOBAL_VARIABLE",
+    "d719b2cb-3d3a-4596-a3bc-dad00e67656f": "IMAGE_SECURITY_DATABASE",
+    "605dab50-e046-4300-abb6-3dd810dd8b23": "SHIM_LOCK",
+    "77fa9abd-0359-4d32-bd60-28f4e78f784b": "Microsoft",
+    "c1c41626-504c-4092-aca9-41f936934328": "EFI_CERT_SHA256",
+    "a5c059a1-94e4-4aa7-87b5-ab155c2bf072": "EFI_CERT_X509",
+    "3bd2a492-96c0-4079-b420-fcf98ef103ed": "EFI_CERT_X509_SHA256",
+    "446dbf63-2502-4cda-bcfa-2465d2b0fe9d": "EFI_CERT_X509_SHA384",
+    "7076876e-80c2-4ee6-aad2-28b349a6865b": "EFI_CERT_X509_SHA512",
+    "826ca512-cf10-4ac9-b187-be01496631bd": "EFI_CERT_SHA1",
+    "eb9d2d31-2d88-11d3-9a16-0090273fc14d": "SMBIOS_TABLE",
+    "f2fd1544-9794-4a2c-992e-e5bbcf20e394": "SMBIOS3_TABLE",
+    "0abba7dc-e516-4167-bbf5-4d9d1c739416": "FWUPDATE",
+}
+
+CERT_SHA256 = "c1c41626-504c-4092-aca9-41f936934328"
+CERT_X509 = "a5c059a1-94e4-4aa7-87b5-ab155c2bf072"
+# Hash-type signature lists and the size of their data.
+HASH_TYPES = {
+    CERT_SHA256: 32,
+    "826ca512-cf10-4ac9-b187-be01496631bd": 20,
+    "3bd2a492-96c0-4079-b420-fcf98ef103ed": 48,  # tbs hash + revocation time
+    "446dbf63-2502-4cda-bcfa-2465d2b0fe9d": 64,
+    "7076876e-80c2-4ee6-aad2-28b349a6865b": 80,
+}
+
+# Variables whose data is a list of EFI_SIGNATURE_LISTs.
+SIGNATURE_DBS = {"PK", "KEK", "db", "dbx", "dbt", "dbr", "MokList", "MokListRT",
+                 "MokListX", "MokListXRT", "PKDefault", "KEKDefault",
+                 "dbDefault", "dbxDefault"}
+
+
+class DecodeError(Exception):
+    pass
+
+
+def guid(b, off=0):
+    if len(b) < off + 16:
+        raise DecodeError("short GUID")
+    d1, d2, d3 = struct.unpack_from("<IHH", b, off)
+    rest = b[off + 8:off + 16]
+    return f"{d1:08x}-{d2:04x}-{d3:04x}-{rest[:2].hex()}-{rest[2:].hex()}"
+
+
+def guid_name(g):
+    return f"{g} ({KNOWN_GUIDS[g]})" if g in KNOWN_GUIDS else g
+
+
+def utf16z(b):
+    """A NUL-terminated UTF-16LE string and the bytes it used."""
+    for i in range(0, len(b) - 1, 2):
+        if b[i] == 0 and b[i + 1] == 0:
+            return b[:i].decode("utf-16-le", "replace"), i + 2
+    return b.decode("utf-16-le", "replace"), len(b)
+
+
+def printable(b):
+    s = b.rstrip(b"\0")
+    if s and all(32 <= c < 127 for c in s):
+        return s.decode()
+    return None
+
+
+# --- device paths ----------------------------------------------------------
+
+def device_path(b):
+    """Text form of a device path. Tolerates a truncated end node, which some
+    firmware measures (see the PCR 1 notes in CLAUDE.md)."""
+    nodes = []
+    off = 0
+    while off < len(b):
+        if off + 4 > len(b):
+            if b[off] == 0x7F:
+                nodes.append("<end node cut short>")
+            else:
+                nodes.append(f"<{len(b) - off} trailing bytes>")
+            break
+        typ, sub, ln = struct.unpack_from("<BBH", b, off)
+        if ln < 4 or off + ln > len(b):
+            nodes.append(f"<truncated {typ:#x}/{sub:#x}>")
+            break
+        d = b[off + 4:off + ln]
+        off += ln
+        if typ == 0x7F:
+            if sub == 0xFF:
+                break
+            nodes.append(",")
+            continue
+        nodes.append(dp_node(typ, sub, d))
+    return "/".join(nodes).replace("/,/", ",")
+
+
+def dp_node(typ, sub, d):
+    try:
+        if typ == 1 and sub == 1:
+            return f"Pci({d[1]:#x},{d[0]:#x})"
+        if typ == 1 and sub == 4:
+            return f"VenHw({guid(d)})"
+        if typ == 2 and sub == 1:
+            hid, uid = struct.unpack_from("<II", d)
+            if hid == 0x0A0341D0:
+                return f"PciRoot({uid:#x})"
+            return f"Acpi({hid:#x},{uid:#x})"
+        if typ == 3 and sub == 5:
+            return f"USB({d[0]:#x},{d[1]:#x})"
+        if typ == 3 and sub == 0x0B:
+            return f"MAC({d[:6].hex()},{d[32]:#x})"
+        if typ == 3 and sub == 0x12:
+            hba, pm, lun = struct.unpack_from("<HHH", d)
+            return f"Sata({hba:#x},{pm:#x},{lun:#x})"
+        if typ == 3 and sub == 0x17:
+            nsid, eui = struct.unpack_from("<IQ", d)
+            return f"NVMe({nsid:#x},{eui:016x})"
+        if typ == 3 and sub == 0x0A:
+            return f"VenMsg({guid(d)})"
+        if typ == 3 and sub == 0x18:
+            return f"Uri({d.decode(errors='replace')})"
+        if typ == 4 and sub == 1:
+            part, start, size = struct.unpack_from("<IQQ", d)
+            sig, fmt, sigtype = d[20:36], d[36], d[37]
+            if sigtype == 2:
+                s = f"GPT,{guid(sig)}"
+            elif sigtype == 1:
+                s = f"MBR,{struct.unpack_from('<I', sig)[0]:#x}"
+            else:
+                s = f"{fmt:#x},{sigtype:#x}"
+            return f"HD({part},{s},{start:#x},{size:#x})"
+        if typ == 4 and sub == 2:
+            return f"CDROM({struct.unpack_from('<I', d)[0]:#x})"
+        if typ == 4 and sub == 3:
+            return f"VenMedia({guid(d)})"
+        if typ == 4 and sub == 4:
+            return utf16z(d)[0]
+        if typ == 4 and sub == 6:
+            return f"FvFile({guid(d)})"
+        if typ == 4 and sub == 7:
+            return f"Fv({guid(d)})"
+        if typ == 4 and sub == 8:
+            start, end = struct.unpack_from("<QQ", d, 4)
+            return f"Offset({start:#x},{end:#x})"
+        if typ == 5 and sub == 1:
+            devtype, status = struct.unpack_from("<HH", d)
+            text = d[4:].split(b"\0")[0].decode(errors="replace")
+            return f'BBS({devtype:#x},"{text}",{status:#x})'
+    except (struct.error, IndexError, DecodeError):
+        pass
+    return f"Path({typ:#x},{sub:#x},{d.hex()})"
+
+
+# --- signature lists and certificates ----------------------------------------
+
+_cert_cache = {}
+
+
+def describe_cert(der):
+    fp = hashlib.sha256(der).hexdigest()
+    if fp in _cert_cache:
+        return _cert_cache[fp]
+    info = {"sha256": fp}
+    if shutil.which("openssl"):
+        r = subprocess.run(
+            ["openssl", "x509", "-inform", "DER", "-noout", "-nameopt",
+             "RFC2253", "-subject", "-issuer", "-serial", "-enddate"],
+            input=der, capture_output=True, check=False)
+        if r.returncode == 0:
+            for line in r.stdout.decode(errors="replace").splitlines():
+                key, _, val = line.partition("=")
+                key = {"notAfter": "not_after"}.get(key.strip(), key.strip())
+                info[key] = val.strip()
+        else:
+            info["error"] = "not a valid X.509 certificate"
+    _cert_cache[fp] = info
+    return info
+
+
+def signature_data(stype, entry):
+    """One EFI_SIGNATURE_DATA: owner GUID + data."""
+    owner = guid(entry)
+    data = entry[16:]
+    out = {"owner": guid_name(owner)}
+    if stype == CERT_X509:
+        out["cert"] = describe_cert(data)
+    else:
+        out["hash"] = data.hex()
+    return out
+
+
+def signature_lists(b):
+    lists = []
+    off = 0
+    while off < len(b):
+        if off + 28 > len(b):
+            raise DecodeError("truncated EFI_SIGNATURE_LIST")
+        stype = guid(b, off)
+        lsize, hsize, ssize = struct.unpack_from("<III", b, off + 16)
+        if lsize < 28 + hsize or off + lsize > len(b) or ssize < 16:
+            raise DecodeError("bad EFI_SIGNATURE_LIST sizes")
+        entries = []
+        p = off + 28 + hsize
+        while p + ssize <= off + lsize:
+            entries.append(signature_data(stype, b[p:p + ssize]))
+            p += ssize
+        lists.append({"type": guid_name(stype), "entries": entries})
+        off += lsize
+    return lists
+
+
+def authority_data(name, data):
+    """Authority records hold the single EFI_SIGNATURE_DATA that verified an
+    image (db, MokListRT), shim's vendor cert as raw DER ("Shim"), or the
+    SbatLevel text."""
+    if name.startswith("SbatLevel"):
+        return {"text": data.decode(errors="replace")}
+    if data[:1] == b"\x30":
+        return {"cert": describe_cert(data)}
+    if len(data) == 16 + 32:
+        return {"owner": guid_name(guid(data)), "sha256": data[16:].hex()}
+    if len(data) > 16 and data[16:17] == b"\x30":
+        return {"owner": guid_name(guid(data)), "cert": describe_cert(data[16:])}
+    return {"data": data.hex()}
+
+
+# --- event types ----------------------------------------------------------------
+
+def load_option(data):
+    """EFI_LOAD_OPTION, or the same without Attributes/FilePathListLength,
+    which aurora's firmware measures for Boot#### (see CLAUDE.md)."""
+    if len(data) >= 6:
+        attrs, fplen = struct.unpack_from("<IH", data)
+        desc, used = utf16z(data[6:])
+        if 6 + used + fplen <= len(data):
+            p = 6 + used
+            out = {"attributes": f"{attrs:#x}", "description": desc,
+                   "path": device_path(data[p:p + fplen])}
+            if p + fplen < len(data):
+                out["optional_data"] = data[p + fplen:].hex()
+            return out
+    desc, used = utf16z(data)
+    return {"description": desc, "path": device_path(data[used:]),
+            "note": "measured without Attributes/FilePathListLength"}
+
+
+def variable_event(etype, b):
+    if len(b) < 32:
+        raise DecodeError("short UEFI_VARIABLE_DATA")
+    vguid = guid(b)
+    nlen, dlen = struct.unpack_from("<QQ", b, 16)
+    name = b[32:32 + 2 * nlen].decode("utf-16-le", "replace")
+    data = b[32 + 2 * nlen:]
+    out = {"guid": guid_name(vguid), "name": name, "length": dlen}
+    if len(data) != dlen:
+        out["note"] = f"{len(data)} data bytes present"
+    if etype == "EV_EFI_VARIABLE_AUTHORITY":
+        out.update(authority_data(name, data))
+    elif name in SIGNATURE_DBS:
+        out["lists"] = signature_lists(data)
+    elif name == "BootOrder":
+        out["order"] = ",".join(f"Boot{v:04X}" for v in
+                                struct.unpack(f"<{len(data) // 2}H", data))
+    elif name.startswith("Boot") and len(name) == 8:
+        out["option"] = load_option(data)
+    elif name in ("SecureBoot", "SetupMode", "AuditMode", "DeployedMode") and data:
+        out["value"] = data[0]
+    elif name.startswith("Sbat"):
+        out["text"] = data.decode(errors="replace")
+    else:
+        out["data"] = data.hex()
+    return out
+
+
+def image_load(b):
+    loc, length, link, dplen = struct.unpack_from("<QQQQ", b)
+    return {"location": f"{loc:#x}", "length": length,
+            "link_address": f"{link:#x}",
+            "path": device_path(b[32:32 + dplen])}
+
+
+def gpt_event(b):
+    hsize = struct.unpack_from("<I", b, 12)[0]
+    disk = guid(b, 56)
+    esize = struct.unpack_from("<I", b, 84)[0]
+    count = struct.unpack_from("<Q", b, hsize)[0]
+    parts = []
+    p = hsize + 8
+    for _ in range(count):
+        e = b[p:p + esize]
+        first, last = struct.unpack_from("<QQ", e, 32)
+        parts.append({"type": guid(e), "uuid": guid(e, 16),
+                      "first_lba": first, "last_lba": last,
+                      "name": utf16z(e[56:128])[0]})
+        p += esize
+    return {"disk": disk, "partitions": parts}
+
+
+def blob2(b):
+    n = b[0]
+    base, length = struct.unpack_from("<QQ", b, 1 + n)
+    return {"description": b[1:1 + n].rstrip(b"\0").decode(errors="replace"),
+            "base": f"{base:#x}", "length": length}
+
+
+def handoff_tables2(b):
+    n = b[0]
+    out = {"description": b[1:1 + n].rstrip(b"\0").decode(errors="replace")}
+    count = struct.unpack_from("<Q", b, 1 + n)[0]
+    tables = []
+    p = 1 + n + 8
+    for _ in range(count):
+        tables.append({"guid": guid_name(guid(b, p)),
+                       "address": f"{struct.unpack_from('<Q', b, p + 16)[0]:#x}"})
+        p += 24
+    out["tables"] = tables
+    return out
+
+
+def event_tag(b):
+    tid, size = struct.unpack_from("<II", b)
+    data = b[8:8 + size]
+    out = {"id": f"{tid:#010x}"}
+    text = printable(data)
+    if text is None and len(data) % 2 == 0:
+        text = data.decode("utf-16-le", "replace").rstrip("\0")
+        if not text.isprintable():
+            text = None
+    if text is not None:
+        out["text"] = text
+    else:
+        out["data"] = data.hex()
+    return out
+
+
+def text_event(b):
+    text = printable(b)
+    if text is None and len(b) % 2 == 0:
+        t = b.decode("utf-16-le", "replace").rstrip("\0")
+        if t.isprintable():
+            text = t
+    return {"text": text} if text is not None else {"data": b.hex()}
+
+
+def separator(b):
+    v = b.hex()
+    return {"value": {"00000000": "success", "ffffffff": "error"}.get(v, v)}
+
+
+def no_action(b):
+    if b.startswith(b"Spec ID Event"):
+        return {"text": "Spec ID Event"}
+    if b.startswith(b"StartupLocality"):
+        return {"text": "StartupLocality", "locality": b[16] if len(b) > 16 else None}
+    return text_event(b)
+
+
+def post_code(b):
+    if len(b) == 16 and printable(b) is None:
+        base, length = struct.unpack("<QQ", b)
+        return {"base": f"{base:#x}", "length": length}
+    return text_event(b)
+
+
+DECODERS = {
+    "EV_EFI_VARIABLE_DRIVER_CONFIG": variable_event,
+    "EV_EFI_VARIABLE_BOOT": variable_event,
+    "EV_EFI_VARIABLE_BOOT2": variable_event,
+    "EV_EFI_VARIABLE_AUTHORITY": variable_event,
+    "EV_EFI_BOOT_SERVICES_APPLICATION": lambda t, b: image_load(b),
+    "EV_EFI_BOOT_SERVICES_DRIVER": lambda t, b: image_load(b),
+    "EV_EFI_RUNTIME_SERVICES_DRIVER": lambda t, b: image_load(b),
+    "EV_EFI_GPT_EVENT": lambda t, b: gpt_event(b),
+    "EV_EFI_PLATFORM_FIRMWARE_BLOB2": lambda t, b: blob2(b),
+    "EV_POST_CODE2": lambda t, b: blob2(b),
+    "EV_EFI_HANDOFF_TABLES2": lambda t, b: handoff_tables2(b),
+    "EV_EVENT_TAG": lambda t, b: event_tag(b),
+    "EV_SEPARATOR": lambda t, b: separator(b),
+    "EV_NO_ACTION": lambda t, b: no_action(b),
+    "EV_POST_CODE": lambda t, b: post_code(b),
+    "EV_S_CRTM_VERSION": lambda t, b: text_event(b),
+    "EV_S_CRTM_CONTENTS": lambda t, b: text_event(b),
+    "EV_EFI_ACTION": lambda t, b: text_event(b),
+    "EV_ACTION": lambda t, b: text_event(b),
+    "EV_IPL": lambda t, b: text_event(b),
+    "EV_COMPACT_HASH": lambda t, b: text_event(b),
+    "EV_EFI_HCRTM_EVENT": lambda t, b: text_event(b),
+}
+
+
+def decode_record(rec):
+    content = rec.get("content") or {}
+    if rec.get("content_type") != "pcclient_std" or "event_data" not in content:
+        return None
+    etype = content.get("event_type", "")
+    fn = DECODERS.get(etype)
+    if fn is None:
+        return None
+    try:
+        return fn(etype, bytes.fromhex(content["event_data"]))
+    except (DecodeError, struct.error, IndexError, ValueError) as e:
+        return {"error": f"can't decode: {e}"}
+
+
+# --- output ----------------------------------------------------------------------
+
+def target(rec):
+    if "pcr" in rec:
+        return str(rec["pcr"])
+    for key in ("nv_index", "nvIndex", "nvindex"):
+        if key in rec:
+            v = rec[key]
+            return f"{v:#x}" if isinstance(v, int) else str(v)
+    return "-"
+
+
+def summary(rec, dec):
+    content = rec.get("content") or {}
+    if rec.get("content_type") != "pcclient_std":
+        s = content.get("string")
+        return content.get("eventType", ""), s if s is not None else json.dumps(content)
+    etype = content.get("event_type", "?")
+    if dec is None:
+        return etype, content.get("event_data", "")
+    if "error" in dec:
+        return etype, dec["error"]
+    if "name" in dec:
+        s = dec["name"]
+        if "order" in dec:
+            s += " " + dec["order"]
+        elif "option" in dec:
+            s += f' "{dec["option"]["description"]}" {dec["option"]["path"]}'
+        elif "text" in dec:
+            s += " " + dec["text"].strip().replace("\n", "\\n")
+        elif "value" in dec:
+            s += f" = {dec['value']}"
+        elif "lists" in dec:
+            n = sum(len(sl["entries"]) for sl in dec["lists"])
+            s += f" ({n} entr{'y' if n == 1 else 'ies'})"
+        elif "cert" in dec:
+            s += " " + dec["cert"].get("subject", dec["cert"]["sha256"])
+        elif "sha256" in dec:
+            s += f" sha256:{dec['sha256']}"
+        return etype, s
+    if "path" in dec:
+        return etype, dec["path"]
+    for key in ("text", "value", "description"):
+        if key in dec:
+            return etype, str(dec[key])
+    if "partitions" in dec:
+        return etype, f"disk {dec['disk']}, {len(dec['partitions'])} partitions"
+    if "data" in dec:
+        h = dec["data"]
+        return etype, h if len(h) <= 64 else f"{h[:64]}… ({len(h) // 2} bytes)"
+    return etype, json.dumps(dec)
+
+
+def details(dec):
+    """Indented lines for the parts that don't fit the summary."""
+    lines = []
+    for sl in dec.get("lists", []):
+        lines.append(f"list {sl['type']}")
+        for e in sl["entries"]:
+            if "cert" in e:
+                c = e["cert"]
+                lines.append(f"  {c.get('subject', '?')}  owner {e['owner']}")
+                lines.append(f"    issuer {c.get('issuer', '?')}, "
+                             f"not after {c.get('not_after', '?')}, "
+                             f"sha256 {c['sha256']}")
+            else:
+                lines.append(f"  {e['hash']}  owner {e['owner']}")
+    if "cert" in dec and "lists" not in dec:
+        c = dec["cert"]
+        if "owner" in dec:
+            lines.append(f"owner {dec['owner']}")
+        lines.append(f"issuer {c.get('issuer', '?')}, sha256 {c['sha256']}")
+    if "sha256" in dec and "owner" in dec and "cert" not in dec:
+        lines.append(f"owner {dec['owner']}")
+    for p in dec.get("partitions", []):
+        lines.append(f"{p['uuid']} {p['type']} {p['first_lba']}-{p['last_lba']} {p['name']}")
+    for t in dec.get("tables", []):
+        lines.append(f"{t['guid']} at {t['address']}")
+    return lines
+
+
+def print_text(records):
+    for rec in records:
+        dec = rec.get("decoded")
+        etype, s = summary(rec, dec)
+        num = rec.get("recnum", "")
+        print(f"{target(rec):>9} {num!s:>4}  {etype:<34} {s}")
+        if dec:
+            for line in details(dec):
+                print(f"{'':>16}{line}")
+
+
+def parse_pcrs(spec):
+    pcrs = set()
+    for part in spec.split(","):
+        a, _, b = part.partition("-")
+        lo, hi = int(a), int(b or a)
+        if lo > hi:
+            raise ValueError(f"bad range {part}")
+        pcrs.update(range(lo, hi + 1))
+    return pcrs
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="pcrlock decode",
+        description="Decode event_data in TPM event log records.")
+    ap.add_argument("file", nargs="?",
+                    help="CEL JSON from 'systemd-pcrlock cel', or a .pcrlock "
+                         "file; '-' for stdin (default: run systemd-pcrlock cel)")
+    ap.add_argument("--text", action="store_true",
+                    help="readable listing instead of JSON")
+    ap.add_argument("--pcr", help="only these PCRs, e.g. 7 or 0-5,7")
+    args = ap.parse_args()
+
+    if args.file in (None, ""):
+        r = subprocess.run(["/usr/lib/systemd/systemd-pcrlock", "cel"],
+                           capture_output=True, check=False)
+        if r.returncode != 0:
+            sys.exit("pcrlock decode: systemd-pcrlock cel failed: "
+                     + r.stderr.decode(errors="replace").strip())
+        raw = r.stdout
+    elif args.file == "-":
+        raw = sys.stdin.buffer.read()
+    else:
+        with open(args.file, "rb") as f:
+            raw = f.read()
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError as e:
+        sys.exit(f"pcrlock decode: not JSON: {e}")
+
+    records = doc["records"] if isinstance(doc, dict) and "records" in doc else doc
+    if not isinstance(records, list):
+        sys.exit("pcrlock decode: expected a JSON array of records or {\"records\": [...]}")
+    if args.pcr:
+        try:
+            pcrs = parse_pcrs(args.pcr)
+        except ValueError as e:
+            sys.exit(f"pcrlock decode: --pcr: {e}")
+        records = [r for r in records if r.get("pcr") in pcrs]
+
+    for rec in records:
+        dec = decode_record(rec)
+        if dec is not None:
+            rec["decoded"] = dec
+
+    if args.text:
+        print_text(records)
+    else:
+        if isinstance(doc, dict) and "records" in doc:
+            doc["records"] = records
+        else:
+            doc = records
+        json.dump(doc, sys.stdout, indent=2)
+        print()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BrokenPipeError:
+        sys.exit(141)

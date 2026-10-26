@@ -13,6 +13,8 @@ shopt -s nullglob
 readonly PROG=${0##*/}
 readonly VERSION=0.1.0
 readonly PCRLOCK=/usr/lib/systemd/systemd-pcrlock
+readonly CEL_DECODE=/usr/lib/pcrlock-toolkit/cel-decode
+readonly CRYPTTAB=/etc/crypttab
 readonly MAKE_POLICY_UNIT=systemd-pcrlock-make-policy.service
 # make-policy builds one PolicyOR per PCR, and TPM2_PolicyOR takes at most 8
 # branches.
@@ -95,6 +97,13 @@ Commands:
   relock-firmware         Lock them again: regenerate their components from
                            the event log and rebuild the full policy. Run by
                            $RELOCK_UNIT on the next boot.
+  decode [--text] [--pcr=PCRS] [FILE|-]
+                           Decode the event data of the TPM event log (or of
+                           CEL JSON / a .pcrlock file): variables, signature
+                           lists and certificates, boot options, device paths.
+  volume-keys              Show the volume keys measured this boot, the
+                           fixate-volume-key= value for each and whether
+                           $CRYPTTAB has it.
 
 Options:
   --type=TYPE[,TYPE...]    generate: only components of these types.
@@ -1073,6 +1082,68 @@ cmd_relock_firmware() {
     log "PCRs ${pcrs[*]} are locked again"
 }
 
+# cmd_volume_keys: systemd-cryptsetup measures HMAC(volume key,
+# "cryptsetup:<name>:<uuid>") with tpm2-measure-pcr=yes. Its sha256 digest is
+# what fixate-volume-key= in crypttab expects, independent of how the volume
+# was unlocked. The NvPCR keyslot record (tpm2-measure-keyslot-nvpcr=) is the
+# one that names the unlock method and keyslot.
+cmd_volume_keys() {
+    local keys slots name uuid digest how state o
+    local -a opts hints=()
+    local -A unlock=() fixed=() listed=()
+    local mismatch=0
+    ensure_cel
+    keys=$(jq -r '.[] | select(.content.eventType? == "volume-key")
+        | (.content.string | split(":")) as $f
+        | [$f[1], ($f[2:] | join(":")),
+           ([.digests[] | select(.hashAlg == "sha256") | .digest][0] // "-")]
+        | @tsv' "$CEL") || die "can't read the volume-key records"
+    slots=$(jq -r '.[] | select(.content.eventType? == "keyslot")
+        | .content.string | split(":") | [.[1], (.[3:] | join(":"))] | @tsv' "$CEL") ||
+        die "can't read the keyslot records"
+    while IFS=$'\t' read -r name how; do
+        [[ -n $name ]] && unlock[$name]=$how
+    done <<<"$slots"
+    if [[ -r $CRYPTTAB ]]; then
+        while read -r name _ _ o _; do
+            [[ -n $name && $name != \#* ]] || continue
+            listed[$name]=1
+            IFS=, read -ra opts <<<"${o:-}"
+            for o in "${opts[@]}"; do
+                [[ $o == fixate-volume-key=* ]] && fixed[$name]=${o#*=}
+            done
+        done <"$CRYPTTAB"
+    fi
+    if [[ -z $keys ]]; then
+        log "no volume keys measured this boot (tpm2-measure-pcr=yes in $CRYPTTAB?)"
+        return 0
+    fi
+
+    printf '%-12s %-10s %-14s %s\n' VOLUME UNLOCKED CRYPTTAB DIGEST
+    while IFS=$'\t' read -r name uuid digest; do
+        if [[ -z ${listed[$name]:-} ]]; then
+            state="no entry"
+        elif [[ -z ${fixed[$name]:-} ]]; then
+            state="not fixed"
+            hints+=("$name: fixate-volume-key=$digest")
+        elif [[ ${fixed[$name],,} == "${digest,,}" ]]; then
+            state=fixed
+        else
+            state=MISMATCH
+            mismatch=1
+        fi
+        printf '%-12s %-10s %-14s %s\n' "$name" "${unlock[$name]:--}" "$state" "$digest"
+        debug "$name: LUKS UUID $uuid"
+    done <<<"$keys"
+    if ((${#hints[@]})); then
+        echo
+        echo "To pin them, add to the options in $CRYPTTAB:"
+        printf '  %s\n' "${hints[@]}"
+    fi
+    ((!mismatch)) || warn "a fixate-volume-key= in $CRYPTTAB doesn't match the measured volume key"
+    ((!mismatch))
+}
+
 # valid_kver KVER: a kernel version usable as a variant file name. "-previous"
 # is reserved for the kept variant of the running kernel.
 valid_kver() {
@@ -1129,6 +1200,11 @@ cmd_uki() {
 
 main() {
     local args=() cmd
+    # decode has its own options and reads files, so it needs no root and
+    # skips the rest.
+    if [[ ${1:-} == decode ]]; then
+        exec "$CEL_DECODE" "${@:2}"
+    fi
     while (($#)); do
         case $1 in
         --dry-run) dry_run=1 ;;
@@ -1167,6 +1243,7 @@ main() {
     check) ((${#args[@]} == 0)) || die "check takes no arguments"; cmd_check ;;
     suspend-firmware) cmd_suspend_firmware "${args[@]}" ;;
     relock-firmware) ((${#args[@]} == 0)) || die "relock-firmware takes no arguments"; cmd_relock_firmware ;;
+    volume-keys) ((${#args[@]} == 0)) || die "volume-keys takes no arguments"; cmd_volume_keys ;;
     help) usage ;;
     *) die "unknown command: $cmd (see --help)" ;;
     esac

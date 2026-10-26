@@ -9,9 +9,14 @@ without a reason.
 ## Layout and commands
 
 - `bin/pcrlock`: bash CLI (`generate`, `list`, `prune`, `uki add|remove`,
-  `check`, `suspend-firmware`, `relock-firmware`).
+  `check`, `suspend-firmware`, `relock-firmware`, `decode`, `volume-keys`).
   Reads `/etc/pcrlock-toolkit/pcrlock.conf` and `components.d/*.conf`, writes
   to `/etc/pcrlock.d`.
+- `libexec/cel-decode`: Python (stdlib only, `openssl` for certificate
+  details), installed to `/usr/lib/pcrlock-toolkit/`. Decodes `event_data`
+  of `systemd-pcrlock cel` output or `.pcrlock` files. `pcrlock decode`
+  execs it before option parsing and the root check, since it has its own
+  options and reads files.
 - `bin/platsec-pcr-check`: POSIX sh, runs in the initrd. Checks memory
   encryption (TSME/TME), IOMMU and pre-boot DMA, measures one event, powers off
   if the baseline isn't met.
@@ -55,7 +60,11 @@ add a real `tests/`) before changing generation or prune logic.
 
 - shellcheck-clean. Disable a check only with an inline comment saying why
   (jq programs in single quotes; dracut-provided variables in module-setup.sh).
-- Initrd code is POSIX sh (test with `dash -n`). `bin/pcrlock` may use bash.
+- Initrd code is POSIX sh (test with `dash -n`), or a native binary if
+  needed. Host-side code may use bash, Python (stdlib only, so it needs no
+  extra packages; Python is there anyway where ukify builds UKIs) or Rust.
+  Binary parsing goes to Python, not bash. `make check` parses the Python
+  files and runs `ruff check` if available.
 - Config files are `Key=Value`, **parsed, never sourced**. Unknown keys and
   malformed lines are hard errors with `file:line`.
 - platsec precedence: CLI > `PLATSEC_*` env > `platsec.conf` > defaults.
@@ -435,9 +444,10 @@ ExitBootServices events is buggy, not a configuration to accept.
   - A db (or MokListRT) **hash** match is measured like a cert match:
     `check_db_hash_in_ram` logs the matching `EFI_SIGNATURE_DATA` (owner
     GUID + hash) as `EV_EFI_VARIABLE_AUTHORITY` in PCR 7. EDK2-based
-    firmware does the same as far as known; on aurora, the early
-    authority record before the separator is probably the RTX 4090 ROM
-    hash (not checked yet).
+    firmware does the same as far as known. aurora's db holds the RTX 4090
+    ROM as an `EFI_CERT_SHA256` entry (`dc4ab0fd…`, owner `18b539e7-…`);
+    whether the early authority record before the separator is that hash
+    is still to be checked with `pcrlock decode --text --pcr=7`.
   - shim deduplicates its own PCR 7 authority records
     (`tpm_data_measured`): each db or MokList entry it verifies with is
     measured once per boot, the first time it's used.
@@ -466,9 +476,13 @@ ExitBootServices events is buggy, not a configuration to accept.
   - With a pending `Mok*` request (`MokNew`, `MokSB`, …) and no MokManager,
     shim started from the removable path (`\EFI\BOOT\BOOTX64.EFI`) resets
     after a 10 s countdown, i.e. loops; elsewhere it fails to boot.
-- **Volume-key records.** cryptsetup's PCR 15 volume-key record differs by
-  unlock method in practice. The NvPCR keyslot record
-  (`tpm2-measure-keyslot-nvpcr`) carries the keyslot index.
+- **Volume-key records.** The PCR 15 volume-key record is
+  HMAC(volume key, `cryptsetup:<name>:<LUKS UUID>`), so it doesn't depend
+  on the unlock method, and its sha256 digest is exactly the
+  `fixate-volume-key=` value (enrolled that way on aurora). The NvPCR
+  keyslot record (`tpm2-measure-keyslot-nvpcr`,
+  `cryptsetup-keyslot:<name>:<uuid>:tpm2:1`) is the one that names the
+  unlock method and keyslot, so it changes with them.
 - **v262 changes.** Since v262, cryptsetup measures via the pcrextend Varlink
   service, and `tpm2-measure-bank=` is ignored.
 - **Stale `pcrlock.json`.** Deleting `/var/lib/systemd/pcrlock.json` fixed
@@ -714,12 +728,16 @@ the logged content against the digest. ✗ is expected for volume-key records
       then swap in the re-signed files. A failed write leaves everything as
       it was. Step 1 keeps both certs, so an interruption is harmless. Keep
       db small.
-    - **One pending PCR 7 change at a time:** pcrlock multiplies variants
-      per component. A pending db change (2) × authority change (2) ×
-      SbatLevel bump (2) already uses all 8. Rotations are queued while
-      another rotation or a generation bump is pending, and `check_budget`
-      runs before each one. With three keys on separate schedules, this
-      serialization is needed.
+    - **Combine pending PCR 7 changes:** the location window doesn't help,
+      since every PCR 7 component sits before 791, and the state before the
+      window is the product of their variant counts (pcrlock counts "old db
+      with new authority" too). SbatLevel and the authority records share
+      620, so with one combined "next state" variant per component it's
+      240 × 620 = 2 × 2 = 4, however many changes are pending. Separate
+      variants per change would multiply past 8. A single whole-state PCR 7
+      component (all PCR 7 records in log order, PCR 7 taken out of the
+      separator component) would bring it to 2. `check_budget` runs before
+      each write either way.
     - **Timestamps:** every full write needs a strictly newer timestamp;
       use `max(now, last + 1 s)` so a clock that went backwards doesn't get
       writes refused.

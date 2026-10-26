@@ -17,6 +17,7 @@ SCRIPTS = bin/pcrlock bin/platsec-pcr-check bin/mor-lock libexec/sign-file-tpm2 
 	kernel-install/99-pcrlock.install \
 	dracut/91platsec/module-setup.sh dracut/91pcr15seal/module-setup.sh \
 	dracut/91morlock/module-setup.sh
+PYTHON = libexec/cel-decode
 
 .PHONY: all check install
 
@@ -32,12 +33,15 @@ check:
 	bash -n dracut/91pcr15seal/module-setup.sh
 	bash -n dracut/91morlock/module-setup.sh
 	if command -v shellcheck >/dev/null; then shellcheck $(SCRIPTS); fi
+	python3 -c 'import ast, sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]' $(PYTHON)
+	if command -v ruff >/dev/null; then ruff check $(PYTHON); fi
 
 install:
 	install -Dm755 bin/pcrlock                         $(DESTDIR)$(BINDIR)/pcrlock
 	install -Dm755 bin/platsec-pcr-check               $(DESTDIR)$(BINDIR)/platsec-pcr-check
 	install -Dm755 bin/mor-lock                        $(DESTDIR)$(BINDIR)/mor-lock
 	install -Dm755 libexec/sign-file-tpm2              $(DESTDIR)$(LIBDIR)/sign-file-tpm2
+	install -Dm755 libexec/cel-decode                  $(DESTDIR)$(LIBDIR)/cel-decode
 	install -Dm755 kernel-install/99-pcrlock.install   $(DESTDIR)$(KINSTALLDIR)/99-pcrlock.install
 	install -Dm644 hooks/25-pcrlock-pe.hook            $(DESTDIR)$(ALPMHOOKDIR)/25-pcrlock-pe.hook
 	install -Dm644 units/platsec-pcr-check.service     $(DESTDIR)$(UNITDIR)/platsec-pcr-check.service

@@ -21,12 +21,14 @@ depends=(
   'grep'
   'kmod' # modprobe in the initrd
   'tpm2-tss'
+  'python' # pcrlock decode
 )
 optdepends=(
   'dracut: initrd modules platsec and pcr15seal'
   'tpm2-openssl: TPM2-backed DKMS module signing via sign-file-tpm2'
+  'openssl: certificate details in pcrlock decode'
 )
-checkdepends=('dash') # make check: dash -n on the POSIX sh scripts
+checkdepends=('dash' 'python') # make check: dash -n on the POSIX sh scripts, Python syntax
 backup=(
   'etc/pcrlock-toolkit/pcrlock.conf'
   'etc/pcrlock-toolkit/platsec.conf'

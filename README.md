@@ -39,6 +39,7 @@ for a TPM2-unlocked system:
 | `pcrlock-firmware-suspend.path` | runs `pcrlock suspend-firmware` when fwupd stages a UEFI capsule (opt-in) |
 | `/usr/lib/dracut/modules.d/91platsec`, `91morlock`, `91pcr15seal` | initrd modules (opt-in) |
 | `/usr/lib/pcrlock-toolkit/mkosi-initrd/` | `initrd.target.wants` trees for the mkosi-initrd drop-ins |
+| `/usr/lib/pcrlock-toolkit/cel-decode` | event log decoder behind `pcrlock decode` (Python) |
 | `/usr/share/pcrlock-toolkit/examples/` | example components, dracut and mkosi-initrd configs, pacman hooks, DKMS signing config |
 
 ### mkosi-initrd
@@ -70,6 +71,9 @@ pcrlock uki remove KVER
 pcrlock check                  show how many values each PCR can take (max 8)
 pcrlock suspend-firmware [--if-capsule-pending] [PCRS]
 pcrlock relock-firmware
+pcrlock decode [--text] [--pcr=PCRS] [FILE|-]
+                               decode the event data of the event log
+pcrlock volume-keys            measured volume keys and fixate-volume-key= values
 ```
 
 Options: `--type=TYPE[,TYPE...]`, `--policy=now|mark|none`, `--dry-run`, `-v`.
@@ -282,3 +286,43 @@ the update and it's still pending after the relock, it's not suspended for
 again; stage it again (which rewrites the capsule file) or run
 `pcrlock suspend-firmware` by hand. Capsules staged another way (Dell's
 recovery file, U-Boot without `OsIndications`, other tools) aren't detected.
+
+### Reading the event log
+
+`systemd-pcrlock cel` prints each firmware record's event data as hex.
+`pcrlock decode` decodes it and adds a `decoded` object to every record it
+understands, so the output still works with jq; `--text` prints a listing
+instead:
+
+```text
+pcrlock decode --text --pcr=7          # runs systemd-pcrlock cel (needs root)
+systemd-pcrlock cel | pcrlock decode -
+pcrlock decode /etc/pcrlock.d/240-secureboot-policy.pcrlock
+```
+
+It decodes UEFI variables (PK, KEK, db, dbx and MokList as signature lists,
+certificates with subject, issuer and SHA-256 via `openssl`, `BootOrder`,
+`Boot####` load options, SbatLevel), the single db entry or hash in
+authority records, image loads with their device path, the GPT, firmware
+blobs, handoff tables, event tags, separators and text events. Records it
+doesn't know keep their hex. systemd's own records (PCR 11–15, NvPCRs) are
+already readable and are passed through.
+
+### Pinning volume keys
+
+With `tpm2-measure-pcr=yes`, systemd-cryptsetup measures
+HMAC(volume key, `cryptsetup:<name>:<LUKS UUID>`), and its SHA-256 digest is
+exactly what `fixate-volume-key=` in `/etc/crypttab` expects. It doesn't
+depend on how the volume was unlocked. `pcrlock volume-keys` lists every
+volume key measured this boot, the unlock method from the NvPCR keyslot
+record (`tpm2-measure-keyslot-nvpcr=yes`) if there is one, and whether
+`/etc/crypttab` pins it:
+
+```text
+VOLUME       UNLOCKED   CRYPTTAB       DIGEST
+root         tpm2:1     fixed          0e94502a…
+secondary    -          not fixed      3c1f…
+```
+
+For volumes that aren't pinned yet it prints the option to add. It exits
+with an error if a `fixate-volume-key=` doesn't match the measured key.
