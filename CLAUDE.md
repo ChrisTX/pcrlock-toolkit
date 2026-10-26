@@ -815,15 +815,129 @@ the logged content against the digest. ✗ is expected for volume-key records
     the db config record; both are predicted. `Type=secureboot-authority`
     and the PCR 14 component (MokList now includes the `shim_certificate`
     certs) need updating.
-  - **Own shim package** (AUR, from Arch's PKGBUILD): `REQUIRE_TPM`, the
-    loader path set to systemd-boot's default path so systemd-boot updates
-    work unchanged, no `fbx64.efi` next to a shim in `\EFI\BOOT`, and
-    optionally its `.sbat` patched before signing.
-    `ENABLE_CODESIGN_EKU` is broken upstream: since the OpenSSL 3.5.0
-    migration it only compiles `CryptPkcs7VerifyEku.c`, and nothing calls
-    `VerifyEKUsInPkcs7Signature` (PKCS#7 verification uses
-    `X509_PURPOSE_ANY`). It needs an upstream fix (possible PR) before it
-    can be used here.
+  - **Own shim build.** A `shim-src` package installs the current shim
+    source (e.g. under `/usr/share`), and the tool builds shim locally, the
+    way DKMS builds modules (gcc; the bundled gnu-efi and OpenSSL come with
+    the source).
+    - **Vendor key:** built in via `VENDOR_CERT_FILE` (or several entries
+      via `VENDOR_DB_FILE`), managed and rotated by the tool. It
+      only authorises other keys, like a CA: it signs `shim_certificate*.efi`
+      and `revocations_sbat.efi`. It carries only the code-signing EKU and
+      is held in the TPM. shim mirrors it into `MokListRT`, so the kernel
+      sees it like a MOK. On aurora MOKs are trusted for modules, so it
+      could probably sign modules too, unless the kernel restricts that
+      keyring to CA certs.
+    - **Only this shim accepts the helper files.** Files anchored to the
+      vendor key are rejected by any other shim (another distribution in a
+      dual boot), and the vendor cert isn't in db.
+    - **Built-in SbatLevel:** shim's own `.sbatlevel` (automatic and latest)
+      is the merged level with the far-future datestamp, so a new shim
+      raises SbatLevel by itself. `revocations_sbat.efi`, signed by the
+      vendor key, is only needed for bumps between shim builds.
+    - **Built-in revocations:** `VENDOR_DBX_FILE` compiles a dbx in, which
+      shim mirrors to `MokListXRT`. That replaces MokListX entries, which
+      need MokManager otherwise.
+    - **Enrolled by hash (single boot):** the shim stays unsigned and its
+      Authenticode hash goes into db. Each rebuild (e.g. monthly with the
+      vendor key rotation) is a KEK-signed db write, interactive, in two
+      steps: add the new hash, remove the old one after a good boot. No
+      dbx entry is needed, since removing the hash is the revocation. The
+      tool builds the binary, so PCR 4 (Authenticode), the db entry and the
+      authority record (PCR 7) are known before the reboot; bit-reproducible
+      builds aren't needed.
+    - **Build options** default on, opt-out in the config: `REQUIRE_TPM`,
+      the loader path set to systemd-boot's default path (so systemd-boot
+      updates work unchanged), no `fbx64.efi` next to a shim in `\EFI\BOOT`,
+      later `ENABLE_CODESIGN_EKU`. There's no build option that disables
+      MokManager; `check_mok_request` must be patched to ignore requests.
+    - `ENABLE_CODESIGN_EKU` is broken upstream: since the OpenSSL 3.5.0
+      migration it only compiles `CryptPkcs7VerifyEku.c`, and nothing calls
+      `VerifyEKUsInPkcs7Signature` (PKCS#7 verification uses
+      `X509_PURPOSE_ANY`). Reported as
+      [rhboot/shim#834](https://github.com/rhboot/shim/issues/834); a
+      maintainer is looking into it.
+  - **Per-key trust anchors.** Each key in the config says how its trust is
+    anchored, e.g. `Anchor=`:
+    - `mokmanager`: enrolled by the user via MokManager; the tool only
+      manages the key (TPM-held, signing).
+    - `vendor`: delivered by a `shim_certificate*.efi` signed by the vendor
+      key of our own shim build; this installation only.
+    - `db`: a certificate file signed by a db key; every installed OS's
+      shim accepts it.
+    - `ephemeral-db`: a db key rotated constantly (see the per-binary
+      evaluation for its cost).
+
+    MOKs delivered by certificate files exist only for the boot that
+    loaded them: our running system sees them in `MokListRT` and the kernel
+    keyring, but another installed OS (e.g. Fedora for a game's anti-cheat)
+    never sees them, unlike MokList in NVRAM, which every OS shares.
+    Where a key is anchored also decides what it's trusted for: a
+    third-party key (e.g. NVIDIA's) in db is trusted by the firmware for
+    boot images, and in MokList or a certificate file shim trusts it for
+    images too, unless it carries the module-signing EKU. The tool warns
+    when such a key is anchored where shim trusts it for images.
+  - **Per-key revocation lists.** The signing log keeps, per db key and
+    MOK, what it signed and which of those are revoked. dbx and the
+    built-in vendor dbx (MokListX) are assembled from the lists of every
+    key that is still trusted, plus the Microsoft dbx source if configured.
+    A rotated-out key's list drops out: what it signed already fails the
+    allowlist once the key is gone. Shrinking dbx is a full write (KEK),
+    with the `.auth` snapshot rewritten in the same step.
+  - **Module MOK rotation.** Configurable; default one module MOK per kernel
+    version, like the kernel's own throwaway module key. A signature never
+    has to stay valid across kernel versions.
+    - **Trigger:** a kernel-install plugin (runs for every kernel install,
+      whatever the initrd generator) rather than a pacman hook; time-based
+      rotation as an option.
+    - **Ordering:** DKMS signs from its own pacman hook
+      (`70-dkms-install.hook` on Arch), so the key must exist before. Most
+      robust: the signing helper (`sign-file-tpm2`) creates the key on
+      demand when the kernel version has none, which also covers
+      `dkms autoinstall` run by hand.
+    - **Same transaction:** the cert goes into the vendor-signed certificate
+      file and takes effect at the next boot, together with the new kernel.
+    - **Lifetime:** the private key is kept while its kernel is installed
+      (DKMS rebuilds for the same kernel need it), then deleted and its
+      cert dropped from the certificate file. Deleting it during an upgrade
+      that replaces the running kernel is harmless: the running kernel only
+      needs the cert, which is already in this boot's `MokListRT`.
+    - **One MOK per module build** works too, but a new cert only takes
+      effect at the next boot (an nvidia update without a kernel update
+      can't load until a reboot), and every DKMS build changes PCR 14 and
+      PCR 4.
+- **SBAT tool (design, nothing written yet).** Arch never raises the
+  generations of its SBAT entries (only shim's matter), so the toolkit
+  could give SBAT a use of its own. Independent of the Secure Boot tool.
+  - An `sbat` command manages entries, bumps generations, and assembles
+    `.sbat` contents from several entries (e.g. for `ukify --sbat=`).
+  - **Component names** use a prefix generated once and stored in the
+    config, never the hostname: if names changed, binaries with the old
+    names could never be revoked again. E.g. `<prefix>-kernel-linux-zen`,
+    `<prefix>-systemd`, `<prefix>-uki-linux-zen`, `<prefix>-systemd-boot`.
+  - **Generations follow install order**, not version order: each install
+    event (pacman hook for kernels and systemd, each UKI signing) gets the
+    next generation. The tool keeps the mapping generation ↔ package
+    version; the `vendor_version` column can carry the package version for
+    readers.
+  - **`sbat require <component> <pkgver>`** raises the minimum to the
+    generation that version got when it was first installed. A config can
+    automate it (e.g. keep only the last N kernels).
+    - A **downgrade** gets a new, higher generation (installing it is
+      deliberate), so it stays bootable; the hook warns if it's older than
+      the declared minimum. Reusing its old generation would lock it out
+      until SbatLevel is reset (Secure Boot off).
+    - **Lockout guard:** `require` and the automatic policy refuse to revoke
+      the booted binaries or the kept fallback, and the level is raised
+      only after a successful boot.
+  - **Where the lines go:** the UKI gets kernel, systemd (stub) and uki
+    lines via `ukify --sbat=`. systemd-boot needs its `.sbat` replaced
+    before signing: rewrite in place when the new contents fit the
+    section's file padding, otherwise append a new section and rename the
+    old one (e.g. `.osbat`), since shim refuses two `.sbat` sections. In
+    Python, not objcopy. PCR 4 then locks the patched binary.
+  - SbatLevel changes don't touch other OSes' PCR 7 (only shim measures
+    it). It still doesn't protect against an SbatLevel reset plus an old
+    revocations file; that relies on rotating the key that signs them.
 - **Packaging.** `PKGBUILD` builds from the working tree; switch to a tagged
   source before publishing.
 
