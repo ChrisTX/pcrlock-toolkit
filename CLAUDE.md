@@ -48,7 +48,7 @@ without a reason.
 make check                   # bash -n, sh -n, shellcheck, ruff; must pass (makepkg)
 make test                    # pytest tests/; must pass (makepkg)
 make install DESTDIR=/tmp/x  # staged install to inspect the layout
-makepkg -si                  # PKGBUILD builds from the working tree
+makepkg -si                  # pcrlock-toolkit-git from GitHub (pushed commits only)
 ```
 
 **Tests** (`tests/`, pytest) pin the behaviour of `bin/pcrlock`, so that a
@@ -960,8 +960,11 @@ the logged content against the digest. ✗ is expected for volume-key records
   - SbatLevel changes don't touch other OSes' PCR 7 (only shim measures
     it). It still doesn't protect against an SbatLevel reset plus an old
     revocations file; that relies on rotating the key that signs them.
-- **Packaging.** `PKGBUILD` builds from the working tree; switch to a tagged
-  source before publishing.
+- **Packaging.** `PKGBUILD` is a VCS package (`pcrlock-toolkit-git`) that
+  clones the default branch from GitHub, so it only builds pushed commits
+  (the header comment shows how to build the working copy). Add a regular
+  package with a tagged source once there's a release; `pkgver()` already
+  switches to `<tag>.r<n>.<hash>` after the first tag.
 
 ## Licensing
 
