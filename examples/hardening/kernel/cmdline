@@ -2,9 +2,26 @@
 rd.luks.options=timeout=0
 rootflags=x-systemd.device-timeout=0
 
-# Lock down systemd-gpt-auto-generator and systemd FACTORY_RESET mechanisms
+# Lock down systemd-gpt-auto-generator and systemd FACTORY_RESET mechanisms.
+# The image policy only applies to root with root=dissect(-force); test-boot
+# with a fallback entry first (see README).
+root=dissect-force
+mount.usr=off
 systemd.image_policy=root=encrypted+read-only-off:esp=unprotected+vfat:=absent+unused
 systemd.factory_reset=0
+systemd.tpm2_allow_clear=0
+
+# No first-boot prompts (root password, homed user), even if first boot is
+# forced with systemd.condition_first_boot=; the masks can't be undone later
+systemd.firstboot=off
+systemd.mask=systemd-firstboot.service
+systemd.mask=systemd-homed-firstboot.service
+
+# No extensions merged in the initrd (they come from the unencrypted ESP), and
+# no credentials with a "null" key, not even without a TPM
+rd.systemd.sysext=0
+rd.systemd.confext=0
+systemd.credentials_boot_policy=strict
 
 # Force enable AppArmor, lockdown (integrity) and signature enforcment
 lsm=landlock,lockdown,yama,integrity,apparmor,bpf
@@ -62,6 +79,8 @@ efi_pstore.pstore_disable=0
 
 # Reboot 10s after a panic instead of hanging (oops log is kept via efi-pstore)
 panic=10
+# The same when PID 1 crashes, instead of freezing with decrypted memory
+systemd.crash_action=reboot
 
 # Audit limits
 audit=1
@@ -70,6 +89,9 @@ audit_backlog_limit=8192
 # Disable emergency.target and shell to prevent access to the UKI
 rd.shell=0
 rd.emergency=reboot
+# No debug shell, in the initrd or on the host; a later parameter can't undo a mask
+rd.systemd.mask=debug-shell.service
+systemd.mask=debug-shell.service
 
 quiet
 splash

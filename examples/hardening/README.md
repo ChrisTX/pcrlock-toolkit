@@ -35,6 +35,22 @@ Rebuilding the UKI also re-locks it through `99-pcrlock.install`.
 
 ### systemd lockdown
 
+- `root=dissect-force`: discover root from the GPT with full dissection, so
+  the image policy below applies to root too. Without `root=` (or with
+  `root=gpt-auto`), root is found through the ESP the boot loader reported,
+  and the policy only covers the other partition types. `-force` activates
+  root without waiting for a factory reset phase (there is none with
+  `systemd.factory_reset=0`). `rootflags=` still applies.
+  **Test-boot this with a fallback boot entry first:** if the policy doesn't
+  match the root partition, root is never found, and with
+  `x-systemd.device-timeout=0` the boot waits forever instead of failing.
+  With an explicit `root` entry in `/etc/crypttab` next to auto-discovery,
+  also check afterwards that the crypttab options are still the ones in
+  effect (`systemctl cat systemd-cryptsetup@root.service`) and that the
+  volume-key record still shows up in PCR 15 (`pcrlock volume-keys`).
+- `mount.usr=off`: no separate `/usr` file system, neither discovered from
+  the GPT nor taken from the root's fstab. Discovery is off by default; this
+  makes it explicit.
 - `systemd.image_policy=root=encrypted+read-only-off:esp=unprotected+vfat:=absent+unused`:
   restricts what `systemd-gpt-auto-generator` accepts from the GPT. Root must
   be encrypted, the ESP must be unprotected vfat, and every other partition
@@ -43,6 +59,36 @@ Rebuilding the UKI also re-locks it through `99-pcrlock.install`.
   `/etc/fstab` or `/etc/crypttab`.
 - `systemd.factory_reset=0`: never boot into factory reset mode
   (`systemd-factory-reset-generator`, `systemd-repart`).
+- `systemd.tpm2_allow_clear=0`: `systemd-tpm2-clear.service` never asks the
+  firmware to clear the TPM. Factory reset is already off; this guards the
+  TPM itself, whose clearing would also destroy every key held in it.
+- `systemd.firstboot=off` with
+  `systemd.mask=systemd-firstboot.service systemd.mask=systemd-homed-firstboot.service`:
+  no first-boot prompts on the console, which could set a root password or
+  create a homed user. `systemd.condition_first_boot=on` would otherwise
+  start them on an installed system. `systemd.firstboot=off` alone could be
+  overridden by a later `systemd.firstboot=on` (last occurrence wins), the
+  masks can't. `first-boot-complete.target` is left alone; it only orders
+  first-boot units.
+
+### Boot inputs from outside the UKI
+
+- `rd.systemd.sysext=0 rd.systemd.confext=0`: no system or configuration
+  extensions are merged in the initrd. systemd-stub picks them up from the
+  ESP, which isn't encrypted, and a confext could change the initrd's `/etc`
+  before the root unlock. PCR 13 would then no longer match, but a user
+  could still type the recovery key into the modified initrd. Only for
+  setups that don't use initrd extensions.
+- `systemd.credentials_boot_policy=strict` (systemd 262): never accept
+  credentials encrypted with the "null" key, which offer neither
+  confidentiality nor authenticity. The default, `relaxed`, accepts them
+  when Secure Boot is off or no TPM is found, e.g. after the fTPM was
+  disabled in firmware setup. Credentials bound to the host key or the TPM,
+  such as the pcrlock policy on the ESP, aren't affected; check one boot
+  afterwards anyway.
+- Not set: `systemd.import_credentials=0`. It also stops credentials passed
+  in by systemd-stub, including the pcrlock policy from
+  `/loader/credentials/` that the initrd needs to unlock root.
 
 ### LSMs, lockdown and module signatures
 
@@ -120,6 +166,10 @@ keys that systemd's own `sysctl.d` files don't set belong here, since
   the oops behind a panic survives the reboot. `systemd-pstore.service` moves
   it to `/var/lib/systemd/pstore/` on the next boot (see `dracut.conf.d/pstore.conf`).
 - `panic=10`: reboot 10 seconds after a panic instead of hanging.
+- `systemd.crash_action=reboot`: the same when PID 1 crashes (default:
+  freeze), so decrypted memory doesn't stay in RAM indefinitely. With
+  `mor-lock`'s MOR ClearMemory set, the firmware wipes memory on the way
+  back up.
 - `audit=1 audit_backlog_limit=8192`: audit from early boot, with a backlog
   large enough not to lose boot events.
 
@@ -129,6 +179,15 @@ keys that systemd's own `sysctl.d` files don't set belong here, since
   entering emergency mode. An emergency shell would sit in front of the
   unlocked root, which is why `initrd-pcr15-seal.service` also refuses to
   fall back to it.
+- `rd.systemd.mask=debug-shell.service systemd.mask=debug-shell.service`: no
+  debug shell in the initrd or on the host, whether requested with
+  `rd.systemd.debug_shell`/`systemd.debug_shell` or enabled persistently.
+  Most options take their last occurrence, so a parameter appended later
+  (e.g. by a command line addon on the ESP, measured into PCR 12) would win;
+  a mask can't be undone that way. `emergency.target` isn't masked: failures
+  would then hang instead of following `rd.emergency=reboot`, and on the host
+  `emergency.service` runs sulogin, which refuses without a usable root
+  password.
 - `quiet splash`: plain boot screen.
 
 ## sysctl (`sysctl.d/`)
