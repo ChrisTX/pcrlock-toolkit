@@ -28,7 +28,7 @@ optdepends=(
   'tpm2-openssl: TPM2-backed DKMS module signing via sign-file-tpm2'
   'openssl: certificate details in pcrlock decode'
 )
-checkdepends=('dash' 'python') # make check: dash -n on the POSIX sh scripts, Python syntax
+checkdepends=('dash' 'python' 'python-pytest') # make check: dash -n, Python syntax; make test: pytest
 backup=(
   'etc/pcrlock-toolkit/pcrlock.conf'
   'etc/pcrlock-toolkit/platsec.conf'
@@ -37,7 +37,7 @@ backup=(
 install=pcrlock-toolkit.install
 
 check() {
-  make -C "$startdir" check
+  make -C "$startdir" check test
 }
 
 package() {

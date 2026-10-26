@@ -3,3 +3,7 @@
 *.pkg.tar.*
 CLAUDE.local.md
 /.vscode/
+# Real event log dumps for tests/test_real_log.py: machine-specific, never committed.
+/tests/local/
+__pycache__/
+/.pytest_cache/

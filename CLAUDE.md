@@ -45,16 +45,38 @@ without a reason.
   would conflict with a user's existing file of the same name.
 
 ```text
-make check                   # bash -n, sh -n, shellcheck; must pass (makepkg)
+make check                   # bash -n, sh -n, shellcheck, ruff; must pass (makepkg)
+make test                    # pytest tests/; must pass (makepkg)
 make install DESTDIR=/tmp/x  # staged install to inspect the layout
 makepkg -si                  # PKGBUILD builds from the working tree
 ```
 
-There is no automated test suite yet. During development `bin/pcrlock` was run
-against a stub `systemd-pcrlock` (emitting `{"records":[...]}` from file
-hashes), a fake `cel` JSON event log, and a stub `systemctl` that logs calls,
-by sed-replacing `readonly PCRLOCK=` and `/usr/lib/modules/`. Do the same (or
-add a real `tests/`) before changing generation or prune logic.
+**Tests** (`tests/`, pytest) pin the behaviour of `bin/pcrlock`, so that a
+port (planned: Python) can be checked against the same suite:
+
+- Each test gets a sandbox root (`tests/conftest.py`). The command under
+  test is a copy of `bin/pcrlock` with every absolute system path rewritten
+  into it. The harness asserts that each rewrite happened, so a code change
+  can't silently escape to the real system. Only `Sandbox.run()` knows which
+  implementation runs.
+- Stubs in `tests/stubs/` log every call to `calls.log`:
+  - `systemd-pcrlock`: `cel`, `lock-*` and `list-components`. The Secure
+    Boot records are built from fake efivars with the real
+    `UEFI_VARIABLE_DATA` encoding, so the dbx and SbatLevel rules are
+    tested against real digests.
+  - `systemctl`: `show` resolves the runtime drop-in like the real unit.
+  - `bootctl`, `platsec-pcr-check`.
+- `tests/efi.py` builds variables, signature lists, log records and a
+  minimal PE with a long-named `.sbatlevel` section.
+- `tests/test_real_log.py` runs only with a local dump
+  (`sudo systemd-pcrlock cel > tests/local/cel.json`, gitignored: it holds
+  the machine-id and volume UUIDs). It checks the harness's model against
+  what the firmware and shim really logged, using this machine's efivarfs.
+- When behaviour changes on purpose, change the test in the same commit.
+  Deliberate regressions (keeping `-previous` unconditionally, an equal
+  SbatLevel datestamp winning, no sum over stop points, a db change
+  accepted, relock keeping its state file) each failed a test when the
+  suite was written.
 
 ## Conventions
 

@@ -17,9 +17,9 @@ SCRIPTS = bin/pcrlock bin/platsec-pcr-check bin/mor-lock libexec/sign-file-tpm2 
 	kernel-install/99-pcrlock.install \
 	dracut/91platsec/module-setup.sh dracut/91pcr15seal/module-setup.sh \
 	dracut/91morlock/module-setup.sh
-PYTHON = libexec/cel-decode
+PYTHON = libexec/cel-decode tests/stubs/systemd-pcrlock tests/stubs/systemctl tests/*.py
 
-.PHONY: all check install
+.PHONY: all check test install
 
 all:
 
@@ -32,9 +32,13 @@ check:
 	bash -n dracut/91platsec/module-setup.sh
 	bash -n dracut/91pcr15seal/module-setup.sh
 	bash -n dracut/91morlock/module-setup.sh
-	if command -v shellcheck >/dev/null; then shellcheck $(SCRIPTS); fi
+	if command -v shellcheck >/dev/null; then shellcheck $(SCRIPTS) tests/stubs/bootctl tests/stubs/platsec-pcr-check; fi
 	python3 -c 'import ast, sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]' $(PYTHON)
 	if command -v ruff >/dev/null; then ruff check $(PYTHON); fi
+
+# Pins the behaviour of bin/pcrlock against stubs (see tests/conftest.py).
+test:
+	python3 -m pytest -q tests
 
 install:
 	install -Dm755 bin/pcrlock                         $(DESTDIR)$(BINDIR)/pcrlock

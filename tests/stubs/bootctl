@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stub bootctl for the tests: --print-esp-path prints $STUB_ROOT/esp if it exists.
+[ "$1" = --print-esp-path ] && [ -d "$STUB_ROOT/esp" ] && { echo "$STUB_ROOT/esp"; exit 0; }
+exit 1

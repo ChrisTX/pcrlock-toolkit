@@ -1,0 +1,13 @@
+#!/bin/sh
+# Stub platsec-pcr-check for the tests: --status prints $STUB_ROOT/platsec/status
+# and exits with the code in $STUB_ROOT/platsec/rc (default 0); --print-pcr
+# prints 15.
+echo "platsec-pcr-check $*" >>"$STUB_ROOT/calls.log"
+case $1 in
+--status)
+    cat "$STUB_ROOT/platsec/status"
+    exit "$(cat "$STUB_ROOT/platsec/rc" 2>/dev/null || echo 0)"
+    ;;
+--print-pcr) echo 15 ;;
+*) exit 2 ;;
+esac

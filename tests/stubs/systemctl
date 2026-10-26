@@ -1,0 +1,43 @@
+#!/usr/bin/python3
+"""Stub systemctl for the tests. Logs every call to $STUB_ROOT/calls.log.
+
+- show -P ExecStart UNIT: argv[] from $STUB_ROOT/execstart, or from the last
+  non-empty ExecStart= of the runtime drop-ins under
+  $STUB_ROOT/run/systemd/system/UNIT.d/, like the real unit would resolve.
+- is-enabled [--quiet] UNIT: enabled if $STUB_ROOT/enabled/UNIT exists.
+- restart UNIT: fails if $STUB_ROOT/fail/UNIT exists.
+- Everything else (daemon-reload, set-property) only logs.
+"""
+
+import glob
+import os
+import sys
+
+ROOT = os.environ["STUB_ROOT"]
+args = sys.argv[1:]
+with open(os.path.join(ROOT, "calls.log"), "a") as f:
+    f.write("systemctl " + " ".join(args) + "\n")
+
+words = [a for a in args if not a.startswith("-")]
+verb = words[0] if words else ""
+
+if verb == "show":
+    unit = words[-1]
+    try:
+        with open(os.path.join(ROOT, "execstart")) as f:
+            cmd = f.read().strip()
+    except FileNotFoundError:
+        cmd = "/usr/lib/systemd/systemd-pcrlock make-policy"
+    for drop in sorted(glob.glob(os.path.join(ROOT, f"run/systemd/system/{unit}.d/*.conf"))):
+        with open(drop) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("ExecStart="):
+                    value = line[len("ExecStart="):]
+                    cmd = value.replace("%%", "%") if value else cmd
+    print(f"{{ path={cmd.split()[0]} ; argv[]={cmd} ; ignore_errors=no ; "
+          "start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }")
+elif verb == "is-enabled":
+    sys.exit(0 if os.path.exists(os.path.join(ROOT, "enabled", words[-1])) else 1)
+elif verb == "restart":
+    sys.exit(1 if os.path.exists(os.path.join(ROOT, "fail", words[-1])) else 0)
