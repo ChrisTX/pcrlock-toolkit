@@ -29,9 +29,50 @@ Rebuilding the UKI also re-locks it through `99-pcrlock.install`.
 
 ### Unlock and root device
 
-- `rd.luks.options=timeout=0`: the passphrase/PIN prompt never times out.
 - `rootflags=x-systemd.device-timeout=0`: wait for the root device forever
   instead of dropping to emergency mode.
+- The passphrase/PIN prompt never times out without any option: crypttab's
+  `timeout=` defaults to 0, which waits indefinitely. An earlier version set
+  `rd.luks.options=timeout=0`, which had no effect: options without a UUID
+  only apply to volumes that have neither a crypttab entry nor their own
+  `rd.luks.options=`, and the auto-discovered root ignores them (see below).
+
+#### Options for the auto-discovered root (crypttab override)
+
+`systemd-gpt-auto-generator` sets up the discovered root with fixed options
+and reads none from the command line: `tpm2-device=auto`, plus
+`tpm2-measure-pcr=yes,tpm2-measure-keyslot-nvpcr=yes` when booted from a
+measured UKI. It writes its `systemd-cryptsetup@root.service` to the *late*
+generator directory, which has the lowest priority, so a crypttab entry
+named `root` replaces it entirely. That's the way to add options such as
+`fixate-volume-key=` while auto-discovery still picks the device (the root
+partition on the disk the boot loader came from, checked against the image
+policy):
+
+```text
+root  /dev/disk/by-designator/root-luks  -  tpm2-device=auto,tpm2-measure-pcr=yes,tpm2-measure-keyslot-nvpcr=yes,fixate-volume-key=<digest>,x-initrd.attach
+```
+
+- The device must be the one the discovery path uses: with
+  `root=dissect`/`root=dissect-force` that's
+  `/dev/disk/by-designator/root-luks`; with `root=gpt-auto` or no `root=`
+  it's `/dev/gpt-auto-root-luks`.
+- `x-initrd.attach` puts the entry into the initrd's crypttab.
+- The name must stay `root`, or both units run.
+- `<digest>` is the sha256 digest of the volume-key record in PCR 15,
+  which `pcrlock volume-keys` prints.
+- Whether the image policy is enforced where udev's dissection creates the
+  `by-designator` links hasn't been confirmed; check it on the test boot.
+
+Naming the volume by `UUID=` instead isn't weaker once `fixate-volume-key=`
+is set. The pinned digest is HMAC(volume key,
+`cryptsetup:root:<LUKS UUID>`), so a substituted partition with the same
+UUID but another volume key is refused, and nobody can create a LUKS volume
+with the volume key without knowing it. The binding then only decides which
+disk is used when there are duplicates, a question of availability. Neither
+binding prevents rolling back to an older copy of the same volume; that
+takes something like dm-verity or IMA, which protect the contents rather
+than the key.
 
 ### systemd lockdown
 

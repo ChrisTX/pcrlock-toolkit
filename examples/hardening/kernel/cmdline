@@ -1,5 +1,6 @@
-# Make the password prompt infinite
-rd.luks.options=timeout=0
+# Wait for the root device forever. The passphrase prompt already never times
+# out (crypttab's timeout= defaults to 0); rd.luks.options= wouldn't reach
+# the auto-discovered root anyway (see README)
 rootflags=x-systemd.device-timeout=0
 
 # Lock down systemd-gpt-auto-generator and systemd FACTORY_RESET mechanisms.
