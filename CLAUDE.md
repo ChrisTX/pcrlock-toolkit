@@ -825,6 +825,31 @@ the logged content against the digest. ✗ is expected for volume-key records
       an early-boot PCR 11 policy that `ready` invalidates.
     - Then predict PCR 7 and rewrite `dbx.auth`. fwupd's `uefi_dbx` can't
       work without Microsoft's KEK; disable it.
+  - **Trusted timestamps (optional, off by default).** RFC 3161 timestamps
+    from external timestamping services on the signed binaries, for
+    tamper evidence and to allow revocation by time later.
+    - **Added after signing** (e.g. `osslsigncode add -t <URL>`), so
+      signing stays with `systemd-sbsign` and the TPM key. The timestamp is
+      an unauthenticated attribute of the signature in the certificate
+      table, so the Authenticode hash and PCR 4 don't change.
+    - **What the service sees:** the hash of the signature value (not of
+      the file), plus metadata: IP address, and when and how often we sign.
+    - **What it adds:** a third-party time no key of ours can backdate. If a
+      signing key is compromised, binaries timestamped before that point
+      can be told apart from forgeries.
+    - **Revocation by time:** an `EFI_CERT_X509_SHA256` entry in dbx with a
+      revocation time, plus the service's root or issuing certificate in
+      `dbt` (separate opt-in; that certificate has its own expiry, and a
+      long-lived revocation depends on it staying in `dbt`).
+    - **Firmware-only scope:** only binaries the firmware verifies are
+      affected, i.e. shim, and only on firmware that implements `dbt`
+      (EDK2-based, as far as known). shim supports neither
+      `EFI_CERT_X509_SHA256` entries nor `dbt`, so systemd-boot, UKIs and
+      the helper files can't be revoked by time without changes to shim
+      (upstream or our own build).
+    - **Best effort:** several services, configurable and tried in order.
+      A failed timestamp is a warning, never a failed signing or
+      kernel-install.
   - **PCR 7/14 shape.** Late authorities become roughly:
 
     ```text
