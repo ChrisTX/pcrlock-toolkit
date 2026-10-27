@@ -602,6 +602,22 @@ the logged content against the digest. ✗ is expected for volume-key records
     - **certificates key:** signs `shim_certificate*.efi`. Rotated whenever
       a MOK changes, so an old certificate file with a possibly compromised
       MOK stops verifying.
+  - **Helper files by db hash.** shim's `check_allowlist` looks a binary's
+    SHA-256 up in db (and its built-in vendor db) before it looks at
+    signatures, and the helper files go through it (`verify_image` →
+    `verify_buffer`). A helper file whose hash is in db is accepted even
+    unsigned.
+    - **`shim_certificate*.efi`** changes only when a MOK changes, so a db
+      hash fits well and replaces the certificates key: rotating means
+      replacing the hash in two steps, like shim's.
+    - **`revocations_sbat.efi`** changes with every generation bump, so a
+      hash would mean a KEK-signed db write per bump; a key (or the vendor
+      key of our own shim build) stays the better choice.
+    - A hashed helper file in db is also an image the firmware would run,
+      which is harmless: built on systemd's addon stub, it does nothing
+      useful when started on its own.
+    - aurora's plan: shim and the certificate file by db hash, the
+      revocations file signed by a key.
   - **Chain.**
     - db keys sign only shim, `shim_certificate*.efi` and
       `revocations_sbat.efi`, each with its own key.
@@ -869,18 +885,25 @@ the logged content against the digest. ✗ is expected for volume-key records
       then revoked by time, doesn't work: for shim the certificate is
       simply valid in db, so a leaked key could still sign helper files
       shim accepts.
-    - **`dbt` is global:** a public timestamping service there affects
-      every time-limited revocation in dbx, including those that come with
-      the Microsoft dbx. Popular services (e.g. DigiCert's) also timestamp
-      many Microsoft-signed binaries, so binaries timestamped before an
-      entry's revocation time would be accepted again.
+    - **`dbt` scope:** the timestamp exemption only applies to
+      `EFI_CERT_X509_SHA256/384/512` dbx entries with a non-zero
+      `TimeOfRevocation` (zero means revoked outright). Full
+      `EFI_CERT_X509` entries and `EFI_CERT_SHA256` hashes carry no time,
+      and the Microsoft dbx consists of those, so in practice only our own
+      time-limited entries are affected. A dbx source we don't control
+      (e.g. a vendor's `dbxDefault`) could contain such entries, so when
+      `dbt` is enabled the tool lists time-limited entries it didn't create
+      and warns about them.
     - **Firmware test needed first:** EDK2 implements the time check as far
       as known; aurora's AMI firmware is untested. Firmware that matches
       `EFI_CERT_X509_SHA256` entries but ignores the revocation time would
       reject the binary outright. Test with a throwaway binary (way back: a
       boot without Secure Boot), never with shim.
-    - **Cost:** each iteration writes db and dbx (both KEK-signed), and
-      both change PCR 7.
+    - **Cost:** each iteration writes db and dbx (both KEK-signed). Both
+      are configuration records measured at the same point of the boot, so
+      written in one step they make a single predicted next state of the
+      same component, not an extra PCR 7 variant. What remains is two
+      authenticated writes and a little NVRAM space.
   - **PCR 7/14 shape.** Late authorities become roughly:
 
     ```text
