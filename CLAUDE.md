@@ -66,15 +66,28 @@ port (planned: Python) can be checked against the same suite:
   - `systemd-pcrlock`: `cel`, `lock-*` and `list-components`. The Secure
     Boot records are built from fake efivars with the real
     `UEFI_VARIABLE_DATA` encoding, so the dbx and SbatLevel rules are
-    tested against real digests.
+    tested against real digests. `list-components` mimics the real one
+    (checked on aurora, systemd 262): one object per variant with
+    `variants` as a string and ids repeated, and overrides **per variant
+    file name** across directories (`/etc`'s `600-0xffffffff.pcrlock`
+    replaces only that variant of `/usr/lib`'s `500-separator`), with
+    `/dev/null` symlinks masking. A test checks the real tool's output
+    shape.
   - `systemctl`: `show` resolves the runtime drop-in like the real unit.
   - `bootctl`, `platsec-pcr-check`.
 - `tests/efi.py` builds variables, signature lists, log records and a
   minimal PE with a long-named `.sbatlevel` section.
+- `tests/test_kernel_install.py` runs the kernel-install plugin with
+  `/usr/bin/pcrlock` replaced, by a recorder and end to end through the
+  sandboxed `pcrlock`.
 - `tests/test_real_log.py` runs only with a local dump
   (`sudo systemd-pcrlock cel > tests/local/cel.json`, gitignored: it holds
   the machine-id and volume UUIDs). It checks the harness's model against
   what the firmware and shim really logged, using this machine's efivarfs.
+  First run against aurora's log (October 2026): all passed (Secure Boot
+  variable encoding, single SbatLevel record, PCR 5/14 log components,
+  decoder, volume keys). NvPCR records there carry `nv_index` (a number)
+  and no `pcr`.
 - When behaviour changes on purpose, change the test in the same commit.
   Deliberate regressions (keeping `-previous` unconditionally, an equal
   SbatLevel datestamp winning, no sum over stop points, a db change
@@ -506,8 +519,10 @@ ExitBootServices events is buggy, not a configuration to accept.
   on the unlock method, and its sha256 digest is exactly the
   `fixate-volume-key=` value (enrolled that way on aurora). The NvPCR
   keyslot record (`tpm2-measure-keyslot-nvpcr`,
-  `cryptsetup-keyslot:<name>:<uuid>:tpm2:1`) is the one that names the
-  unlock method and keyslot, so it changes with them.
+  `cryptsetup-keyslot:<name>:<uuid>:<method>:<slot>`, e.g. `tpm2:1`) is the
+  one that names the unlock method and keyslot, so it changes with them.
+  The method is empty for a passphrase, recovery key or key file
+  (`::0`; `pcrlock volume-keys` shows `key:0`).
 - **v262 changes.** Since v262, cryptsetup measures via the pcrextend Varlink
   service, and `tpm2-measure-bank=` is ignored.
 - **Stale `pcrlock.json`.** Deleting `/var/lib/systemd/pcrlock.json` fixed

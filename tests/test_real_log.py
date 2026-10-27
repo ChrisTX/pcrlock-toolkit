@@ -61,3 +61,20 @@ def test_log_components_find_records(real):
     real.component("600-gpt-and-loader.conf", "Type=log\nPCR=5\n")
     real.component("640-mok.conf", 'Type=log\nPCR=14\nFilter=.content_type != "systemd"\n')
     real.ok("generate")
+
+
+def test_volume_keys_from_real_records(real):
+    log = json.loads(LOCAL_CEL.read_text())
+    keys = {r["content"]["string"].split(":")[1]: r["digests"]
+            for r in log if r.get("content", {}).get("eventType") == "volume-key"}
+    slots = {r["content"]["string"].split(":")[1] for r in log
+             if r.get("content", {}).get("eventType") == "keyslot"}
+    if not keys:
+        pytest.skip("no volume keys measured in this log")
+    out = real.ok("volume-keys").stdout
+    rows = {ln.split()[0]: ln.split() for ln in out.splitlines()[1:] if ln.strip()}
+    for name, digests in keys.items():
+        sha = next(d["digest"] for d in digests if d["hashAlg"] == "sha256")
+        assert rows[name][-1] == sha
+        # Unlock method and slot from the NvPCR keyslot record, if measured.
+        assert (rows[name][1] != "-") == (name in slots)

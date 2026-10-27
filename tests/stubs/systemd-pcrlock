@@ -122,21 +122,27 @@ elif verb in ("lock-firmware-code", "lock-firmware-config"):
     with open(os.path.join(d, "generated.pcrlock"), "w") as f:
         json.dump({"records": records}, f)
 elif verb == "list-components":
-    comps = {}
+    # Like the real one (checked on aurora with systemd 262): one object per
+    # variant with "variants" as a string, ids repeated, sorted by id and
+    # then variant file name. A top-level <id>.pcrlock is overridden by the
+    # same file name in a higher-priority directory, and so is each variant
+    # file in <id>.pcrlock.d/, one by one: /etc's 600-0xffffffff.pcrlock
+    # replaces only that variant of /usr/lib's 500-separator. A symlink to
+    # /dev/null masks the file.
+    chosen = {}
     for d in os.environ.get("STUB_COMPONENT_DIRS", "").split(":"):
         if not os.path.isdir(d):
             continue
-        for e in sorted(os.listdir(d)):
+        for e in os.listdir(d):
             p = os.path.join(d, e)
-            if e.endswith(".pcrlock") and os.path.isfile(p):
-                cid, variants = e[:-len(".pcrlock")], [p]
+            if e.endswith(".pcrlock") and not os.path.isdir(p):
+                chosen.setdefault((e[:-len(".pcrlock")], ""), p)
             elif e.endswith(".pcrlock.d") and os.path.isdir(p):
-                cid = e[:-len(".pcrlock.d")]
-                variants = [os.path.join(p, v) for v in sorted(os.listdir(p))
-                            if v.endswith(".pcrlock")]
-            else:
-                continue
-            comps.setdefault(cid, variants)
-    print(json.dumps([{"id": k, "variants": v} for k, v in sorted(comps.items())]))
+                for v in os.listdir(p):
+                    if v.endswith(".pcrlock"):
+                        chosen.setdefault((e[:-len(".pcrlock.d")], v), os.path.join(p, v))
+    print(json.dumps([{"id": cid, "variants": path}
+                      for (cid, _), path in sorted(chosen.items())
+                      if os.path.realpath(path) != "/dev/null"]))
 else:
     sys.exit(f"stub systemd-pcrlock: unsupported verb {verb!r}")

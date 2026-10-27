@@ -108,17 +108,20 @@ class Sandbox:
 
     # --- running -----------------------------------------------------------
 
-    def run(self, *args, stdin=None):
-        env = {
+    def env(self, **extra):
+        return {
             "PATH": f"{STUBS}:/usr/bin:/bin",
             "STUB_ROOT": str(self.root),
             "STUB_COMPONENT_DIRS": f"{self.pcrlock_d}:{self.varlib}",
             "TMPDIR": str(self.root / "tmp"),
             "HOME": str(self.root),
             "LC_ALL": "C.UTF-8",
+            **extra,
         }
+
+    def run(self, *args, stdin=None):
         return subprocess.run([str(self.bin), *args], input=stdin, capture_output=True,
-                              text=True, env=env, timeout=60, check=False)
+                              text=True, env=self.env(), timeout=60, check=False)
 
     def ok(self, *args, **kw):
         r = self.run(*args, **kw)

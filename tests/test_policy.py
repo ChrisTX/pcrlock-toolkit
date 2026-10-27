@@ -68,15 +68,57 @@ def test_pcr_mask_from_execstart(sb):
     assert set(check_table(sb.ok("check").stdout)) == {4}
 
 
+def record(digest, pcr=4):
+    return json.dumps({"records": [{"pcr": pcr, "digests": [{"hashAlg": "sha256", "digest": digest}]}]})
+
+
 def test_varlib_components_are_counted(sb):
     variants(sb, "625-shim", ["a"], ["b"])
     sb.varlib.mkdir(parents=True)
-    (sb.varlib / "626-other.pcrlock").write_text(json.dumps(
-        {"records": [{"pcr": 4, "digests": [{"hashAlg": "sha256", "digest": "q"}]}]}))
-    # Same-named /var/lib components are overridden by /etc ones.
-    (sb.varlib / "625-shim.pcrlock").write_text(json.dumps(
-        {"records": [{"pcr": 4, "digests": [{"hashAlg": "sha256", "digest": "zz"}]}]}))
+    (sb.varlib / "626-other.pcrlock").write_text(record("q"))
     assert check_table(sb.ok("check").stdout) == {4: (2, "ok")}
+
+
+def test_variants_are_overridden_one_by_one(sb):
+    # Like /usr/lib's 500-separator with the error variant replaced from
+    # /etc: a same-named variant file in a higher-priority directory
+    # replaces only that variant; the others still count.
+    variants(sb, "500-separator", ["ok"])  # /etc: v0.pcrlock
+    lower = sb.varlib / "500-separator.pcrlock.d"
+    lower.mkdir(parents=True)
+    (lower / "v0.pcrlock").write_text(record("error"))  # overridden by /etc's v0
+    (lower / "v1.pcrlock").write_text(record("other"))  # still a variant
+    assert check_table(sb.ok("check").stdout) == {4: (2, "ok")}
+
+
+def test_dev_null_masks_a_variant(sb):
+    variants(sb, "500-separator", ["ok"], ["error"])
+    v1 = sb.pcrlock_d / "500-separator.pcrlock.d/v1.pcrlock"
+    v1.unlink()
+    v1.symlink_to("/dev/null")
+    assert check_table(sb.ok("check").stdout) == {4: (1, "ok")}
+
+
+def test_real_list_components_format():
+    # The stub's output shape must match the real tool's (no root needed).
+    import shutil
+    import subprocess
+
+    import pytest
+    tool = "/usr/lib/systemd/systemd-pcrlock"
+    if not shutil.which(tool):
+        pytest.skip("no systemd-pcrlock")
+    r = subprocess.run([tool, "list-components", "--json=short"], capture_output=True,
+                       text=True, check=False)
+    if r.returncode != 0:
+        pytest.skip(f"list-components failed: {r.stderr.strip()}")
+    doc = json.loads(r.stdout)
+    assert isinstance(doc, list)
+    for entry in doc:
+        assert set(entry) == {"id", "variants"}
+        assert isinstance(entry["id"], str) and isinstance(entry["variants"], str)
+    ids = [e["id"] for e in doc]
+    assert ids == sorted(ids)
 
 
 # --- location ---------------------------------------------------------------------
@@ -123,3 +165,13 @@ def test_policy_none_only_warns(sb):
     sb.component("799-seal.conf", "Type=raw\nPCR=15\nText=x\n")
     r = sb.ok("--policy=none", "generate")
     assert "PCR 4 can take 9 values" in r.stderr
+
+
+def test_policy_mark_refused_over_budget(sb):
+    variants(sb, "625-shim", ["a"], ["b"], ["c"])
+    variants(sb, "630-systemd-boot", ["d"], ["e"], ["f"])
+    sb.component("799-seal.conf", "Type=raw\nPCR=15\nText=x\n")
+    r = sb.run("--policy=mark", "generate")
+    assert r.returncode == 1
+    assert "not updating the policy; the current one stays in place" in r.stderr
+    assert sb.calls("systemctl set-property") == []

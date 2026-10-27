@@ -254,3 +254,47 @@ def test_os_indications_without_capsule_bit(sb):
     sb.enable(RELOCK)
     sb.efivar("OsIndications", efi.EFI_GLOBAL, struct.pack("<Q", 0x1))
     assert "no UEFI capsule update is staged" in sb.ok("suspend-firmware", "--if-capsule-pending").stdout
+
+
+def test_relock_runs_lock_firmware_config_for_pcrs_1_and_3(sb):
+    sb.enable(RELOCK)
+    sb.cel(firmware_log())
+    sb.varlib.mkdir(parents=True)
+    (sb.varlib / "250-firmware-code-early.pcrlock").write_text(json.dumps({"records": []}))
+    (sb.varlib / "250-firmware-config-early.pcrlock").write_text(json.dumps({"records": []}))
+    sb.ok("suspend-firmware", "1")
+    sb.reset_calls()
+    sb.ok("relock-firmware")
+    assert "systemd-pcrlock lock-firmware-config" in sb.calls()
+    assert "systemd-pcrlock lock-firmware-code" not in sb.calls()
+
+
+def test_relock_refuses_on_location_mismatch(sb):
+    sb.enable(RELOCK)
+    sb.ok("suspend-firmware")
+    sb.execstart("/usr/lib/systemd/systemd-pcrlock make-policy --strict=yes")
+    sb.reset_calls()
+    r = sb.run("relock-firmware")
+    assert r.returncode == 1
+    assert "uses --location=760-:940-, but Location= is 791:940-" in r.stderr
+    assert "PCRs 0 1 2 3 stay suspended" in r.stderr
+    assert state(sb).exists()
+    assert sb.calls("systemctl restart") == []
+
+
+def test_relock_refuses_over_budget(sb):
+    sb.enable(RELOCK)
+    sb.ok("suspend-firmware")
+    for name, digests in (("625-shim", "abc"), ("630-systemd-boot", "def")):
+        d = sb.pcrlock_d / f"{name}.pcrlock.d"
+        d.mkdir(parents=True)
+        for x in digests:
+            (d / f"{x}.pcrlock").write_text(json.dumps(
+                {"records": [{"pcr": 4, "digests": [{"hashAlg": "sha256", "digest": x}]}]}))
+    sb.reset_calls()
+    r = sb.run("relock-firmware")
+    assert r.returncode == 1
+    assert "PCR 4 can take 9 values" in r.stderr
+    assert "PCRs 0 1 2 3 stay suspended" in r.stderr
+    assert state(sb).exists()
+    assert sb.calls("systemctl restart") == []

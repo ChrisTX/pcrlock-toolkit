@@ -22,6 +22,8 @@ def setup(sb):
         {"nv_index": 0x1D10201, "digests": [], "content_type": "systemd",
          "content": {"string": f"cryptsetup-keyslot:root:{ROOT_UUID}:tpm2:1", "eventType": "keyslot"}},
         vk("secondary", "1111", "b" * 64),
+        {"nv_index": 0x1D10201, "digests": [], "content_type": "systemd",
+         "content": {"string": "cryptsetup-keyslot:secondary:1111::0", "eventType": "keyslot"}},
         vk("extra", "3333", "c" * 64),
         vk("swap", "5555", "d" * 64),
     ])
@@ -46,7 +48,7 @@ def test_volume_keys(sb):
     assert out[0] == ["VOLUME", "UNLOCKED", "CRYPTTAB", "DIGEST"]
     assert out[1:5] == [
         ["root", "tpm2:1", "fixed", "a" * 64],
-        ["secondary", "-", "not", "fixed", "b" * 64],
+        ["secondary", "key:0", "not", "fixed", "b" * 64],
         ["extra", "-", "MISMATCH", "c" * 64],
         ["swap", "-", "no", "entry", "d" * 64],
     ]

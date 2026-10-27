@@ -197,3 +197,17 @@ def test_authority_trailing_newline_preserved(sb):
     target = authority(sb, CURRENT, OLDER)
     sb.ok("generate")
     assert digest_of(sb.read_json(target))[-1] == sbat_digest(CURRENT)
+
+
+def test_authority_keeps_booted_variant_when_sbatlevel_changes(sb):
+    # The booted variant (current level) stays as -previous when a shim
+    # update makes the prediction change.
+    target = authority(sb, CURRENT, OLDER)
+    sb.ok("generate")
+    assert digest_of(sb.read_json(target))[-1] == sbat_digest(CURRENT)
+    (sb.root / "shimx64.efi").write_bytes(efi.pe_with_sbatlevel(NEWER, NEWER))
+    r = sb.ok("generate")
+    assert "as secureboot-authority-previous.pcrlock (matches the current boot)" in r.stdout
+    assert digest_of(sb.read_json(target))[-1] == sbat_digest(NEWER)
+    previous = target.with_name("secureboot-authority-previous.pcrlock")
+    assert digest_of(sb.read_json(previous))[-1] == sbat_digest(CURRENT)

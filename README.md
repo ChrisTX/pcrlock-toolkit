@@ -330,8 +330,9 @@ With `tpm2-measure-pcr=yes`, systemd-cryptsetup measures
 HMAC(volume key, `cryptsetup:<name>:<LUKS UUID>`), and its SHA-256 digest is
 exactly what `fixate-volume-key=` in `/etc/crypttab` expects. It doesn't
 depend on how the volume was unlocked. `pcrlock volume-keys` lists every
-volume key measured this boot, the unlock method from the NvPCR keyslot
-record (`tpm2-measure-keyslot-nvpcr=yes`) if there is one, and whether
+volume key measured this boot, the unlock method and keyslot from the NvPCR
+keyslot record (`tpm2-measure-keyslot-nvpcr=yes`) if there is one (`key`
+for a passphrase, recovery key or key file), and whether
 `/etc/crypttab` pins it:
 
 ```text
