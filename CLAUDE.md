@@ -850,6 +850,37 @@ the logged content against the digest. ✗ is expected for volume-key records
     - **Best effort:** several services, configurable and tried in order.
       A failed timestamp is a warning, never a failed signing or
       kernel-install.
+  - **Ephemeral db keys sealed by time (option for `Anchor=ephemeral-db`).**
+    Sign at time T with an ephemeral key, timestamp the signature (see
+    above), then put the key's certificate into dbx as
+    `EFI_CERT_X509_SHA256` with a revocation time just after T.
+    - **What it adds over a plain ephemeral key:** the key's validity is
+      bounded cryptographically, not by trust that it was deleted. A key
+      that leaked during its short life can't sign anything accepted
+      later, since that would need a timestamp from before T.
+    - **Compared with a db hash:** for a single firmware-verified binary
+      (e.g. our own shim build) an `EFI_CERT_SHA256` entry allows exactly
+      that binary as well, with no timestamp, `dbt` or external service, at
+      48 bytes instead of about 1 KB in db plus about 64 bytes in dbx; both
+      are measured into PCR 7. The key only pays off when it signs several
+      firmware-verified binaries in one go.
+    - **Firmware-only scope:** shim ignores `dbt` and
+      `EFI_CERT_X509_SHA256`. One key signing shim and the helper files,
+      then revoked by time, doesn't work: for shim the certificate is
+      simply valid in db, so a leaked key could still sign helper files
+      shim accepts.
+    - **`dbt` is global:** a public timestamping service there affects
+      every time-limited revocation in dbx, including those that come with
+      the Microsoft dbx. Popular services (e.g. DigiCert's) also timestamp
+      many Microsoft-signed binaries, so binaries timestamped before an
+      entry's revocation time would be accepted again.
+    - **Firmware test needed first:** EDK2 implements the time check as far
+      as known; aurora's AMI firmware is untested. Firmware that matches
+      `EFI_CERT_X509_SHA256` entries but ignores the revocation time would
+      reject the binary outright. Test with a throwaway binary (way back: a
+      boot without Secure Boot), never with shim.
+    - **Cost:** each iteration writes db and dbx (both KEK-signed), and
+      both change PCR 7.
   - **PCR 7/14 shape.** Late authorities become roughly:
 
     ```text
