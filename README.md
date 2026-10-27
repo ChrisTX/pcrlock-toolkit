@@ -73,6 +73,8 @@ pcrlock suspend-firmware [--if-capsule-pending] [PCRS]
 pcrlock relock-firmware
 pcrlock decode [--text] [--pcr=PCRS] [FILE|-]
                                decode the event data of the event log
+pcrlock decode [--text] --efivar=VAR...
+                               decode EFI variables (e.g. KEKDefault, db)
 pcrlock volume-keys            measured volume keys and fixate-volume-key= values
 ```
 
@@ -307,6 +309,20 @@ authority records, image loads with their device path, the GPT, firmware
 blobs, handoff tables, event tags, separators and text events. Records it
 doesn't know keep their hex. systemd's own records (PCR 11–15, NvPCRs) are
 already readable and are passed through.
+
+`--efivar` decodes EFI variables from efivarfs instead of the log, with the
+same decoders (signature lists, boot options, SbatLevel, …) and their
+attributes. It takes a name (`KEKDefault` decodes every variable of that
+name, whatever its GUID), `NAME-GUID`, or a path to an efivarfs file, and
+may be repeated. Reading efivarfs needs no root:
+
+```text
+pcrlock decode --text --efivar=PKDefault --efivar=KEKDefault --efivar=dbDefault
+pcrlock decode --text --efivar=db --efivar=dbx --efivar=SbatLevelRT
+```
+
+The `*Default` variables are the firmware's factory key set, which a reset
+to default keys enrolls.
 
 ### Pinning volume keys
 

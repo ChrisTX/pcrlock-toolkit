@@ -1,6 +1,10 @@
-"""pcrlock volume-keys and the pcrlock decode pass-through."""
+"""pcrlock volume-keys and pcrlock decode (pass-through and --efivar)."""
 
+import glob
 import json
+
+import efi
+import pytest
 
 ROOT_UUID = "e67f24c8-0e7b-4cf4-9a0d-ee6715f001b6"
 
@@ -75,3 +79,45 @@ def test_decode_is_passed_through_before_option_parsing(sb):
     assert "EV_SEPARATOR" in r.stdout and "success" in r.stdout
     doc = json.loads(sb.ok("decode", str(log)).stdout)
     assert doc[0]["decoded"] == {"value": "success"}
+
+
+# --- decode --efivar ------------------------------------------------------------------
+
+def test_decode_efivar_files(sb):
+    kek = sb.efivar("KEKDefault", efi.EFI_GLOBAL,
+                    efi.esl_sha256("77fa9abd-0359-4d32-bd60-28f4e78f784b", b"\x11" * 32), attrs=0x6)
+    sbat = sb.efivar("SbatLevelRT", efi.SHIM_LOCK, b"sbat,1,2024040900\nshim,4\n", attrs=0x6)
+    doc = json.loads(sb.ok("decode", "--efivar", str(kek), "--efivar", str(sbat)).stdout)
+    assert doc[0]["name"] == "KEKDefault"
+    assert doc[0]["guid"].startswith(efi.EFI_GLOBAL)
+    assert doc[0]["attributes"] == ["BS", "RT"]
+    entry = doc[0]["lists"][0]["entries"][0]
+    assert entry == {"owner": "77fa9abd-0359-4d32-bd60-28f4e78f784b (Microsoft)", "hash": "11" * 32}
+    assert doc[1]["text"] == "sbat,1,2024040900\nshim,4\n"
+    text = sb.ok("decode", "--text", "--efivar", str(kek)).stdout
+    assert text.startswith(f"KEKDefault-{efi.EFI_GLOBAL}  [BS,RT]  (1 entry)")
+    assert "11" * 32 in text
+
+
+def test_decode_efivar_errors(sb):
+    r = sb.run("decode", "--efivar", str(sb.root / "missing"))
+    assert r.returncode == 1 and "No such file" in r.stderr
+    r = sb.run("decode", "--efivar", "x/y", "--pcr=7")
+    assert r.returncode == 1 and "--efivar takes no FILE or --pcr" in r.stderr
+    short = sb.root / "short"
+    short.write_bytes(b"\x07")
+    r = sb.run("decode", "--efivar", str(short))
+    assert r.returncode == 1 and "shorter than the attribute header" in r.stderr
+
+
+def test_decode_efivar_by_name_on_this_machine(sb):
+    # Name lookup reads the real efivarfs; SecureBoot exists on any UEFI system.
+    if not glob.glob("/sys/firmware/efi/efivars/SecureBoot-*"):
+        pytest.skip("no efivarfs")
+    doc = json.loads(sb.ok("decode", "--efivar", "SecureBoot").stdout)
+    assert doc[0]["name"] == "SecureBoot" and doc[0]["value"] in (0, 1)
+
+
+def test_decode_missing_log_file(sb):
+    r = sb.run("decode", str(sb.root / "missing.json"))
+    assert r.returncode == 1 and "No such file" in r.stderr and "Traceback" not in r.stderr

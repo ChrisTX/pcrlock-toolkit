@@ -101,6 +101,9 @@ Commands:
                            Decode the event data of the TPM event log (or of
                            CEL JSON / a .pcrlock file): variables, signature
                            lists and certificates, boot options, device paths.
+  decode [--text] --efivar=VAR...
+                           Decode EFI variables from efivarfs instead, e.g.
+                           KEKDefault, db-<guid> or a path to such a file.
   volume-keys              Show the volume keys measured this boot, the
                            fixate-volume-key= value for each and whether
                            $CRYPTTAB has it.

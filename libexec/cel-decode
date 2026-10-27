@@ -8,8 +8,11 @@ if it is available. Part of pcrlock-toolkit, run as `pcrlock decode`.
 """
 
 import argparse
+import glob
 import hashlib
 import json
+import os
+import re
 import shutil
 import struct
 import subprocess
@@ -271,7 +274,15 @@ def variable_event(etype, b):
         out["note"] = f"{len(data)} data bytes present"
     if etype == "EV_EFI_VARIABLE_AUTHORITY":
         out.update(authority_data(name, data))
-    elif name in SIGNATURE_DBS:
+    else:
+        out.update(variable_data(name, data))
+    return out
+
+
+def variable_data(name, data):
+    """The value of a UEFI variable, by name."""
+    out = {}
+    if name in SIGNATURE_DBS:
         out["lists"] = signature_lists(data)
     elif name == "BootOrder":
         out["order"] = ",".join(f"Boot{v:04X}" for v in
@@ -429,6 +440,29 @@ def target(rec):
     return "-"
 
 
+def variable_summary(name, dec):
+    s = name
+    if "order" in dec:
+        s += " " + dec["order"]
+    elif "option" in dec:
+        s += f' "{dec["option"]["description"]}" {dec["option"]["path"]}'
+    elif "text" in dec:
+        s += " " + dec["text"].strip().replace("\n", "\\n")
+    elif "value" in dec:
+        s += f" = {dec['value']}"
+    elif "lists" in dec:
+        n = sum(len(sl["entries"]) for sl in dec["lists"])
+        s += f" ({n} entr{'y' if n == 1 else 'ies'})"
+    elif "cert" in dec:
+        s += " " + dec["cert"].get("subject", dec["cert"]["sha256"])
+    elif "sha256" in dec:
+        s += f" sha256:{dec['sha256']}"
+    elif "data" in dec:
+        h = dec["data"]
+        s += " " + (h if len(h) <= 64 else f"{h[:64]}… ({len(h) // 2} bytes)")
+    return s
+
+
 def summary(rec, dec):
     content = rec.get("content") or {}
     if rec.get("content_type") != "pcclient_std":
@@ -440,23 +474,7 @@ def summary(rec, dec):
     if "error" in dec:
         return etype, dec["error"]
     if "name" in dec:
-        s = dec["name"]
-        if "order" in dec:
-            s += " " + dec["order"]
-        elif "option" in dec:
-            s += f' "{dec["option"]["description"]}" {dec["option"]["path"]}'
-        elif "text" in dec:
-            s += " " + dec["text"].strip().replace("\n", "\\n")
-        elif "value" in dec:
-            s += f" = {dec['value']}"
-        elif "lists" in dec:
-            n = sum(len(sl["entries"]) for sl in dec["lists"])
-            s += f" ({n} entr{'y' if n == 1 else 'ies'})"
-        elif "cert" in dec:
-            s += " " + dec["cert"].get("subject", dec["cert"]["sha256"])
-        elif "sha256" in dec:
-            s += f" sha256:{dec['sha256']}"
-        return etype, s
+        return etype, variable_summary(dec["name"], dec)
     if "path" in dec:
         return etype, dec["path"]
     for key in ("text", "value", "description"):
@@ -509,6 +527,59 @@ def print_text(records):
                 print(f"{'':>16}{line}")
 
 
+# --- efivarfs files -------------------------------------------------------------
+
+EFIVARS = "/sys/firmware/efi/efivars"
+GUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+ATTRIBUTES = [(0x1, "NV"), (0x2, "BS"), (0x4, "RT"), (0x8, "HW_ERROR"),
+              (0x10, "AUTH_WRITE"), (0x20, "TIME_AUTH"), (0x40, "APPEND")]
+
+
+def efivar_files(arg):
+    """Files for --efivar: a path, NAME-GUID, or NAME (every GUID)."""
+    if "/" in arg:
+        return [arg]
+    exact = os.path.join(EFIVARS, arg)
+    if os.path.exists(exact):
+        return [exact]
+    found = sorted(p for p in glob.glob(os.path.join(EFIVARS, glob.escape(arg) + "-*"))
+                   if GUID_RE.fullmatch(os.path.basename(p)[len(arg) + 1:]))
+    if not found:
+        raise DecodeError(f"no EFI variable {arg} in {EFIVARS}")
+    return found
+
+
+def decode_efivar(path):
+    """An efivarfs file: u32 attributes, then the value. Name and GUID come
+    from the file name (NAME-GUID)."""
+    base = os.path.basename(path)
+    vguid = base[-36:] if len(base) > 37 and GUID_RE.fullmatch(base[-36:]) else None
+    name = base[:-37] if vguid else base
+    with open(path, "rb") as f:
+        raw = f.read()
+    if len(raw) < 4:
+        raise DecodeError(f"{path}: shorter than the attribute header")
+    attrs = struct.unpack_from("<I", raw)[0]
+    out = {"file": path, "name": name,
+           "guid": guid_name(vguid) if vguid else None,
+           "attributes": [n for bit, n in ATTRIBUTES if attrs & bit] or [f"{attrs:#x}"],
+           "length": len(raw) - 4}
+    try:
+        out.update(variable_data(name, raw[4:]))
+    except (DecodeError, struct.error, IndexError, ValueError) as e:
+        out["error"] = f"can't decode: {e}"
+    return out
+
+
+def print_efivars(vars_):
+    for v in vars_:
+        label = f"{v['name']}-{v['guid'].split()[0]}" if v["guid"] else v["name"]
+        text = v["error"] if "error" in v else variable_summary("", v).strip()
+        print(f"{label}  [{','.join(v['attributes'])}]  {text}")
+        for line in details(v):
+            print(f"    {line}")
+
+
 def parse_pcrs(spec):
     pcrs = set()
     for part in spec.split(","):
@@ -530,7 +601,26 @@ def main():
     ap.add_argument("--text", action="store_true",
                     help="readable listing instead of JSON")
     ap.add_argument("--pcr", help="only these PCRs, e.g. 7 or 0-5,7")
+    ap.add_argument("--efivar", action="append", metavar="VAR",
+                    help="decode an EFI variable instead: NAME (e.g. KEKDefault, every "
+                         f"GUID), NAME-GUID in {EFIVARS}, or a path to such a file; "
+                         "may be repeated")
     args = ap.parse_args()
+
+    if args.efivar:
+        if args.file or args.pcr:
+            sys.exit("pcrlock decode: --efivar takes no FILE or --pcr")
+        try:
+            files = [f for arg in args.efivar for f in efivar_files(arg)]
+            vars_ = [decode_efivar(f) for f in files]
+        except (DecodeError, OSError) as e:
+            sys.exit(f"pcrlock decode: {e}")
+        if args.text:
+            print_efivars(vars_)
+        else:
+            json.dump(vars_, sys.stdout, indent=2)
+            print()
+        return
 
     if args.file in (None, ""):
         r = subprocess.run(["/usr/lib/systemd/systemd-pcrlock", "cel"],
@@ -542,8 +632,11 @@ def main():
     elif args.file == "-":
         raw = sys.stdin.buffer.read()
     else:
-        with open(args.file, "rb") as f:
-            raw = f.read()
+        try:
+            with open(args.file, "rb") as f:
+                raw = f.read()
+        except OSError as e:
+            sys.exit(f"pcrlock decode: {e}")
     try:
         doc = json.loads(raw)
     except json.JSONDecodeError as e:

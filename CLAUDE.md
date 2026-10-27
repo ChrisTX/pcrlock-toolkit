@@ -14,7 +14,10 @@ without a reason.
   to `/etc/pcrlock.d`.
 - `libexec/cel-decode`: Python (stdlib only, `openssl` for certificate
   details), installed to `/usr/lib/pcrlock-toolkit/`. Decodes `event_data`
-  of `systemd-pcrlock cel` output or `.pcrlock` files. `pcrlock decode`
+  of `systemd-pcrlock cel` output or `.pcrlock` files, and with `--efivar`
+  efivarfs files (4 bytes of attributes, then the value; name and GUID from
+  the file name). Name lookups read `/sys/firmware/efi/efivars` directly, so
+  the tests pass paths. `pcrlock decode`
   execs it before option parsing and the root check, since it has its own
   options and reads files.
 - `bin/platsec-pcr-check`: POSIX sh, runs in the initrd. Checks memory
